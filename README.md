@@ -90,9 +90,32 @@ camera_vision_epics/
 
 ## Documentation
 
-- [EPICS Environment Setup](docs/epics_setup.md) — Installing EPICS Base, asyn, and StreamDevice on Raspberry Pi.
+### Setup and Implementation
+
+- [EPICS Environment Setup](docs/epics_setup.md) — Reproducible installation of EPICS Base, asyn, and StreamDevice on Raspberry Pi.
 - [StreamDevice Camera IOC](docs/streamdevice_ioc.md) — IOC architecture, database records, protocol configuration, Python TCP communication, and testing.
-- [Troubleshooting](docs/troubleshooting.md) — Common installation, build, networking, and IOC configuration issues.
+- [Troubleshooting](docs/troubleshooting.md) — Installation, build, networking, and IOC configuration issues encountered during development.
+
+### Learning Notes
+
+Conceptual explanations of EPICS architecture, instrument communication, and device integration, developed alongside the practical implementation.
+
+- [Understanding EPICS Device Integration](docs/notes/epics_device_integration.md) — Hardware drivers vs. EPICS drivers, StreamDevice, asyn, SCPI instruments, Python APIs, and areaDetector.
+
+These notes complement the implementation guides and will be expanded as the project develops.
+
+## Development and Documentation Approach
+
+This project is developed incrementally, with each working milestone committed to GitHub.
+
+Documentation is maintained alongside the implementation:
+
+- The main README tracks project objectives and progress.
+- Setup and implementation guides provide reproducible instructions.
+- Learning notes explain the underlying EPICS concepts and architectural decisions.
+- Troubleshooting records problems encountered and their solutions.
+
+Completed functionality is documented separately from planned development. As new features are implemented, the corresponding documentation will be updated.
 
 ## Development Roadmap
 
