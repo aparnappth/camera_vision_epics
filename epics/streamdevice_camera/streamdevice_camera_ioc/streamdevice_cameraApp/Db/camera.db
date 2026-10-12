@@ -1,0 +1,12 @@
+
+# PV to get the camera status
+
+record(stringin, "$(P)$(R)GetStatus") {
+    field(DESC, "Camera acquisition status")
+    field(DTYP, "stream")
+    field(INP, "@stream_camera.proto getStatus $(PORT)")
+    field(SCAN, "Passive")
+}
+
+
+

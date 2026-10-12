@@ -5,3 +5,20 @@ images/
 data/
 
 .venv/
+# EPICS generated build directories
+**/O.Common/
+**/O.linux-*/
+
+# EPICS generated installation directories
+epics/**/bin/
+epics/**/lib/
+epics/**/db/
+epics/**/dbd/
+
+# EPICS generated configuration
+epics/**/iocBoot/**/envPaths
+
+# Temporary files
+*~
+*.swp
+*.swo

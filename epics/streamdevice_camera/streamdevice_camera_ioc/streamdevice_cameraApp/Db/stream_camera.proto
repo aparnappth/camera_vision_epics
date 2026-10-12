@@ -1,0 +1,6 @@
+Terminator = LF;
+
+getStatus {
+    out "STATUS?";
+    in "%s";
+}
