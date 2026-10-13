@@ -21,6 +21,11 @@ streamdevice_camera_DBD += base.dbd
 streamdevice_camera_DBD += asyn.dbd
 streamdevice_camera_DBD += drvAsynIPPort.dbd
 streamdevice_camera_DBD += stream.dbd
+# Register the PVAccess server for EPICS database records
+streamdevice_camera_DBD += PVAServerRegister.dbd
+# Register the QSRV provider for EPICS database records
+streamdevice_camera_DBD += qsrv.dbd
+
 # Include dbd files from all support applications:
 #streamdevice_camera_DBD += xxx.dbd
 
@@ -41,6 +46,14 @@ streamdevice_camera_SRCS_vxWorks += -nil-
 streamdevice_camera_LIBS += $(EPICS_BASE_IOC_LIBS)
 streamdevice_camera_LIBS += stream
 streamdevice_camera_LIBS += asyn
+
+
+# PVAccess server support
+streamdevice_camera_LIBS += qsrv
+streamdevice_camera_LIBS += pvAccessIOC
+streamdevice_camera_LIBS += pvAccess
+streamdevice_camera_LIBS += pvData
+
 #===========================
 
 include $(TOP)/configure/RULES
