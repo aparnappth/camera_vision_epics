@@ -1,7 +1,14 @@
 __pycache__/
 *.pyc
 
+
 images/
+
+# Generated camera images and acquisition metadata
+acquisition/tests/*.jpg
+acquisition/tests/*.png
+acquisition/tests/*_metadata.json
+
 data/
 
 .venv/
