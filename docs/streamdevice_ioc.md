@@ -1,84 +1,79 @@
 # StreamDevice Camera IOC — Implementation Guide
 
-This document describes the development, configuration and testing of a conventional EPICS IOC that communicates with a Python TCP server using StreamDevice and asyn.
+This guide documents the conventional EPICS IOC developed for the [EPICS-Controlled Camera Characterization and Vision Platform](../README.md). It covers the original simulated TCP camera service (Milestone 1) and the Picamera2/IMX219 integration with Channel Access (CA) and PVAccess (PVA) support (Milestone 2).
 
-The implementation is part of the [EPICS-Controlled Camera Characterization and Vision Platform](../README.md).
+For dependency installation, see [EPICS Environment Setup](epics_setup.md). For errors encountered during development, see [Troubleshooting](troubleshooting.md).
 
-For installation of EPICS Base, asyn and StreamDevice, see [EPICS Environment Setup](epics_setup.md).
+## 1. Objective and implementation status
 
-## 1. Objective and Current Status
+The IOC communicates with a Python TCP service through **asyn** and **StreamDevice**. The Python service runs on a Raspberry Pi Zero 2 W with a Sony IMX219 CSI camera.
 
-The objective is to create an EPICS interface for controlling a Raspberry Pi IMX219 camera using Python and Picamera2.
+### Milestone 1 — Simulated camera communication
 
-The current implementation establishes communication between an EPICS IOC and a Python TCP service. It supports a status query that returns a fixed `IDLE` response.
+- Created a conventional EPICS IOC using the EPICS Base application templates.
+- Established a TCP command/response interface between StreamDevice and `acquisition/camera_server_simulator.py`.
+- Implemented `STATUS?`, returning a simulated `IDLE` response.
+- Verified local and remote Channel Access from the Raspberry Pi and Windows Subsystem for Linux (WSL).
 
-**Implemented and tested:**
+### Milestone 2 — Picamera2 and PVAccess
 
-- Conventional EPICS IOC compiled for `linux-arm`.
-- StreamDevice and asyn integrated into the IOC.
-- Python TCP server running on the Raspberry Pi.
-- On-demand status request using `CAM:GetStatus.PROC`.
-- Local EPICS Channel Access communication.
-- Remote EPICS access from Windows Subsystem for Linux (WSL).
+- Detected the physical IMX219 through Picamera2 and inspected its properties and controls.
+- Added `acquisition/picamera2_server.py` while retaining the original simulator.
+- Implemented model-name-based discovery and **lazy initialization**: the camera is opened on the first supported `STATUS?` request, not when the TCP server starts.
+- Reused the same camera object for later status requests, and released it on normal keyboard-interrupt shutdown.
+- Enabled PVAccess by linking the PVA server and **QSRV**, which exposes ordinary IOC database records to PVA clients.
+- Verified that both `caget` and `pvget` can access `CAM:GetStatus`.
 
-**Not yet implemented:** Picamera2 camera control, image acquisition, exposure settings, image saving and real camera-status monitoring.
+**Scope of the current implementation:** `IDLE` is a software-maintained state meaning Picamera2 successfully opened the camera. It is not a measurement of ongoing hardware health, and no image capture has yet been implemented through EPICS.
 
-## 2. Communication Architecture
-
-```text
-Windows / WSL
-    |
-    | caget / caput
-    v
-EPICS Channel Access
-    |
-    v
-EPICS IOC (Raspberry Pi)
-    |
-    | camera.db
-    v
-StreamDevice
-    |
-    | stream_camera.proto
-    v
-asyn TCP/IP (CAM_PORT)
-    |
-    | 127.0.0.1:5000
-    v
-Python TCP server
-    |
-    | STATUS?
-    v
-Response: IDLE
-```
-
-The eventual camera interface will extend the Python service:
+## 2. Communication architecture
 
 ```text
-Python TCP server
-       |
-    Picamera2
-       |
-    libcamera
-       |
- Linux camera drivers
-       |
-     IMX219
+              EPICS clients
+         +---------+---------+
+         |                   |
+    Channel Access       PVAccess
+    caget / caput        pvget / pvput
+         |                   |
+         |                  QSRV
+         +---------+---------+
+                   |
+             EPICS IOC
+             camera.db
+                   |
+              StreamDevice
+           stream_camera.proto
+                   |
+             asyn TCP/IP
+            127.0.0.1:5000
+                   |
+          Python TCP service
+                   |
+               Picamera2
+                   |
+               libcamera
+                   |
+                IMX219
 ```
 
-The EPICS IOC and Python service are separate processes.
+The IOC and Python service are separate processes on the Raspberry Pi. `camera.db` defines EPICS records; `stream_camera.proto` defines the wire commands; asyn provides the TCP connection; and the Python service interprets those commands. **The `.proto` file does not invoke Picamera2 methods directly.** It sends text such as `STATUS?`, which Python translates into an operation.
 
-EPICS communicates with the Python service through a TCP connection, rather than executing a Python file directly.
+The simulator uses the same TCP interface but does not access the physical camera. CA and PVA are alternative client protocols for the same IOC records; neither replaces StreamDevice.
 
-## 3. Directory Structure
-
-The current implementation is located in:
+## 3. Repository structure
 
 ```text
 camera_vision_epics/
+├── README.md
 ├── acquisition/
-│   └── camera_server.py
-│
+│   ├── camera_server_simulator.py
+│   └── picamera2_server.py
+├── docs/
+│   ├── epics_setup.md
+│   ├── streamdevice_ioc.md
+│   ├── troubleshooting.md
+│   └── notes/
+│       └── epics_device_integration.md
 └── epics/
     └── streamdevice_camera/
         └── streamdevice_camera_ioc/
@@ -99,66 +94,32 @@ camera_vision_epics/
             └── Makefile
 ```
 
-After compilation, EPICS also generates directories such as `bin/`, `db/`, `dbd/`, `lib/` and architecture-specific build directories.
+The build generates `bin/`, `db/`, `dbd/`, `lib/` and architecture-specific output directories. These are build artifacts, not source files, and are excluded from Git.
 
-These generated files are excluded from Git.
+## 4. Generating the IOC application
 
-## 4. Generating the Conventional IOC
-
-The IOC was generated using the EPICS Base application templates.
-
-From the project root:
+The IOC was originally generated with EPICS Base application templates:
 
 ```bash
 mkdir -p epics/streamdevice_camera/streamdevice_camera_ioc
 cd epics/streamdevice_camera/streamdevice_camera_ioc
-```
-
-Generate the IOC application:
-
-```bash
 makeBaseApp.pl -t ioc streamdevice_camera
-```
-
-This creates the application source directory and the EPICS build configuration.
-
-Generate the IOC boot directory:
-
-```bash
 makeBaseApp.pl -i -t ioc streamdevice_camera
 ```
 
-When prompted for the application name, select `streamdevice_camera`.
+Select `streamdevice_camera` when prompted for the application name. This creates the source tree and `iocBoot/iocstreamdevice_camera/`.
 
-This creates:
+**If cloning this repository, do not rerun these commands inside the existing IOC directory.** The generated application skeleton is already version-controlled.
 
-```text
-iocBoot/iocstreamdevice_camera/
-```
+## 5. External dependencies and RELEASE configuration
 
-**For users cloning this repository:** The IOC skeleton is already included. These generation commands are provided to explain how the application was created. Do not run them again inside the existing IOC directory.
-
-## 5. Configuring External Dependencies
-
-The IOC must locate three external components:
-
-- EPICS Base
-- asyn
-- StreamDevice
-
-These dependencies are configured in:
-
-```text
-configure/RELEASE
-```
-
-The original Raspberry Pi installation uses:
+The IOC uses EPICS Base, asyn and StreamDevice. The original Raspberry Pi environment was configured through `configure/RELEASE` with:
 
 ```makefile
 include /home/aparna/projects/epics/support/modules/RELEASE.local
 ```
 
-The shared configuration contains:
+The shared release configuration contains paths of the following form:
 
 ```makefile
 SUPPORT=/home/aparna/projects/epics/support/modules
@@ -169,78 +130,53 @@ CALC=
 PCRE=
 ```
 
-The IOC's `configure/RELEASE` also defines the EPICS Base location.
+These are machine-specific absolute paths. Adjust them to match your installation when reproducing the build. The RELEASE file tells the build system where dependencies are located; the IOC Makefile determines which components are registered and linked. In this project, the PVA and QSRV components were available in the existing EPICS Base installation.
 
-**Reproducing on another system:** Update these paths to match the local EPICS installation. The absolute paths shown here are specific to the original Raspberry Pi environment.
+The versions used in the development environment were EPICS Base R7.0.10, asyn R4-46 and StreamDevice 2.8.26. Check compatibility when using other versions.
 
-The `RELEASE` configuration tells the EPICS build system where external modules are installed. It does not, by itself, determine which libraries are linked into the IOC.
+## 6. IOC source Makefile
 
-## 6. IOC Source Makefile
+The IOC executable is configured in `streamdevice_cameraApp/src/Makefile`.
 
-The IOC executable is configured in:
-
-```text
-streamdevice_cameraApp/src/Makefile
-```
-
-The important sections are described below.
-
-### 6.1 IOC executable
+### 6.1 Executable and database definitions
 
 ```makefile
 PROD_IOC = streamdevice_camera
-```
+DBD += streamdevice_camera.dbd
 
-This specifies the name of the executable to build.
-
-### 6.2 Database definitions
-
-The application includes EPICS Base, asyn and StreamDevice definitions.
-
-The relevant configuration used in the working build is:
-
-```makefile
 streamdevice_camera_DBD += base.dbd
 streamdevice_camera_DBD += asyn.dbd
 streamdevice_camera_DBD += drvAsynIPPort.dbd
 streamdevice_camera_DBD += stream.dbd
+
+# PVAccess server and IOC database provider
+streamdevice_camera_DBD += PVAServerRegister.dbd
+streamdevice_camera_DBD += qsrv.dbd
 ```
 
-The DBD files declare record types, device support and registration functions available to the IOC.
+DBD files declare record types, device support, drivers and registration functions. `drvAsynIPPort.dbd` supports configuration of the asyn TCP/IP port. `PVAServerRegister.dbd` registers PVA server startup, and `qsrv.dbd` registers the QSRV provider.
 
-The asyn IP port registration allows the IOC to configure TCP/IP communication.
+### 6.2 Libraries
 
-### 6.3 Libraries
-
-The IOC links against StreamDevice and asyn:
+The relevant linked libraries are:
 
 ```makefile
 streamdevice_camera_LIBS += stream
 streamdevice_camera_LIBS += asyn
-```
 
-It also links the standard EPICS Base IOC libraries:
+streamdevice_camera_LIBS += qsrv
+streamdevice_camera_LIBS += pvAccessIOC
+streamdevice_camera_LIBS += pvAccess
+streamdevice_camera_LIBS += pvData
 
-```makefile
 streamdevice_camera_LIBS += $(EPICS_BASE_IOC_LIBS)
 ```
 
-The DBD definitions and libraries serve different purposes:
+Libraries contain the compiled implementations; DBD files provide the declarations needed by IOC registration. Both are needed. The complete Makefile also retains the generated record/device-driver registration source and IOC entry point.
 
-- **DBD files** declare the EPICS components to register.
-- **Libraries** contain the compiled implementations of those components.
+## 7. EPICS database — `camera.db`
 
-Both are required for the corresponding functionality to be available.
-
-## 7. EPICS Database — `camera.db`
-
-The source database is located at:
-
-```text
-streamdevice_cameraApp/Db/camera.db
-```
-
-The current record is:
+Source: `streamdevice_cameraApp/Db/camera.db`.
 
 ```text
 record(stringin, "$(P)$(R)GetStatus") {
@@ -251,89 +187,30 @@ record(stringin, "$(P)$(R)GetStatus") {
 }
 ```
 
-### 7.1 Record type
+- `stringin` stores a string returned by the service, such as `IDLE`.
+- `DTYP = stream` selects StreamDevice record support.
+- `INP` identifies the protocol file, operation name and asyn port.
+- `SCAN = Passive` means the IOC does not poll this record periodically; processing must be triggered explicitly or by another supported processing mechanism.
 
-```text
-record(stringin, "$(P)$(R)GetStatus")
-```
+### 7.1 Macros
 
-This defines a string input record.
-
-The record is used because the Python server returns text such as `IDLE`.
-
-### 7.2 Database macros
-
-The database uses:
-
-| Macro | Purpose | Example |
+| Macro | Meaning | Example |
 |---|---|---|
-| `P` | Device prefix | `CAM:` |
-| `R` | Additional record-name component | Empty |
+| `P` | PV prefix | `CAM:` |
+| `R` | Additional record-name suffix/prefix component | empty |
 | `PORT` | asyn port name | `CAM_PORT` |
 
-When loaded with these values:
-
-```text
-P=CAM:,R=,PORT=CAM_PORT
-```
-
-the record becomes:
-
-```text
-CAM:GetStatus
-```
-
-Macros allow the same database to be reused for different devices or port names.
-
-### 7.3 Device support
-
-```text
-field(DTYP, "stream")
-```
-
-This tells EPICS to use StreamDevice when processing the record.
-
-### 7.4 Input link
-
-```text
-field(INP, "@stream_camera.proto getStatus $(PORT)")
-```
-
-The input link identifies three things:
-
-| Component | Meaning |
-|---|---|
-| `stream_camera.proto` | StreamDevice protocol file |
-| `getStatus` | Protocol operation |
-| `$(PORT)` | Configured asyn port |
-
-After macro substitution, the input link becomes:
+Loading with `P=CAM:,R=,PORT=CAM_PORT` creates the record `CAM:GetStatus`. After macro substitution, the input link is:
 
 ```text
 @stream_camera.proto getStatus CAM_PORT
 ```
 
-### 7.5 Passive processing
+**Configuration check:** During development, the IOC startup output also showed an unused-looking `SCAN=1 second` macro argument. The displayed database record has a literal `field(SCAN, "Passive")`, so that extra macro does not change its SCAN field unless the source database actually references `$(SCAN)`. Confirm the runtime value with `caget CAM:GetStatus.SCAN` and document any future change consistently.
 
-```text
-field(SCAN, "Passive")
-```
+## 8. StreamDevice protocol — `stream_camera.proto`
 
-The record is not periodically scanned.
-
-Instead, a fresh status request can be triggered explicitly through its `.PROC` field.
-
-This avoids continuously sending `STATUS?` commands to the Python service.
-
-## 8. StreamDevice Protocol — `stream_camera.proto`
-
-The protocol source is located at:
-
-```text
-streamdevice_cameraApp/Db/stream_camera.proto
-```
-
-Its current contents are:
+Source: `streamdevice_cameraApp/Db/stream_camera.proto`.
 
 ```text
 Terminator = LF;
@@ -344,514 +221,458 @@ getStatus {
 }
 ```
 
-### 8.1 Message terminator
+`Terminator = LF` specifies a newline (`\n`) for the request and response. The `out` statement sends `STATUS?`; the `in` statement parses the returned string. `getStatus` is the operation name referenced by the database; **that name is not sent to Python**.
+
+The exchange is:
 
 ```text
-Terminator = LF;
+IOC → Python: STATUS?\n
+Python → IOC: IDLE\n
 ```
 
-This specifies a line-feed character (`\n`) as the message terminator.
+The record chooses the operation, the `.proto` file defines the wire format, and Python implements the command. TCP is a byte stream; a newline is the protocol's intended command delimiter.
 
-The actual transmitted request is:
+## 9. Installing database and protocol files
 
-```text
-STATUS?\n
-```
-
-The expected response is:
-
-```text
-IDLE\n
-```
-
-TCP transports a stream of bytes and does not inherently preserve command boundaries. A terminator provides a way to identify complete text messages.
-
-### 8.2 Protocol operation
-
-```text
-getStatus {
-    out "STATUS?";
-    in "%s";
-}
-```
-
-`getStatus` is the name of a StreamDevice protocol operation.
-
-It is referenced by the EPICS database, but the name itself is not sent to Python.
-
-The `out` statement sends the command, while the `in` statement parses the returned string.
-
-### 8.3 Why the protocol is separate
-
-The database defines which operation should be performed.
-
-The protocol file defines the command and response format.
-
-The Python server implements the command.
-
-For example, changing the Python command from `STATUS?` to another text command would generally require updating the protocol and Python service, not necessarily the EPICS record name.
-
-## 9. Installing Database and Protocol Files
-
-The source files are installed using:
-
-```text
-streamdevice_cameraApp/Db/Makefile
-```
-
-The relevant entries are:
+In `streamdevice_cameraApp/Db/Makefile`, the working installation includes:
 
 ```makefile
 DB += camera.db
 DB += stream_camera.proto
 ```
 
-After building, the files are installed into:
+After `make`, both should appear in the IOC root's installed `db/` directory:
 
-```text
-streamdevice_camera_ioc/db/
+```bash
+ls db
 ```
 
-The installed directory should contain:
+Expected filenames:
 
 ```text
 camera.db
 stream_camera.proto
 ```
 
-Always edit the source files in `streamdevice_cameraApp/Db/`.
+**Edit the sources in `streamdevice_cameraApp/Db/`, not the generated copies in `db/`.** Installed files can be overwritten by the next build.
 
-Changes made directly to installed copies can be overwritten during the next build.
+## 10. Python TCP camera services
 
-## 10. Python TCP Server
-
-The Python server is implemented in:
-
-```text
-acquisition/camera_server.py
-```
-
-It uses Python's built-in `socket` module.
-
-### 10.1 Server address
+Both services listen on the same local address:
 
 ```python
 HOST = "127.0.0.1"
 PORT = 5000
 ```
 
-`127.0.0.1` is the loopback address.
+Only one can run on that address and port at a time. Binding to `127.0.0.1` prevents direct TCP connections to this Python service from other computers; remote EPICS clients connect to the IOC instead.
 
-Because both the IOC and Python service run on the Raspberry Pi, the server does not need to listen on the Pi's external network interface.
+### 10.1 Simulator
 
-Port `5000` is a chosen application port, not an EPICS-specific port.
+`acquisition/camera_server_simulator.py` is the Milestone 1 implementation. It receives `STATUS?` and responds with a fixed value:
 
-### 10.2 Socket setup
+```python
+response = "IDLE\n"
+```
 
-The server creates a TCP socket:
+It does not use Picamera2. Keep it as a way to test the IOC and StreamDevice communication independently of the camera.
+
+### 10.2 Real Picamera2 service: initial state
+
+`acquisition/picamera2_server.py` imports:
+
+```python
+from picamera2 import Picamera2
+import socket
+```
+
+The server starts with:
+
+```python
+camera = None
+camera_status = "CLOSED"
+```
+
+`None` means no camera object has been created. Starting the TCP server alone does not open the IMX219.
+
+### 10.3 Finding the camera by model name
+
+```python
+def find_camera():
+    cameras = Picamera2.global_camera_info()
+
+    for cam in cameras:
+        if cam["Model"] == "imx219":
+            return cam["Num"]
+
+    raise RuntimeError("IMX219 camera not found")
+```
+
+This searches Picamera2's discovered cameras and returns the index of the first IMX219. It raises an error if none is found. If several IMX219 cameras are present, this approach does not distinguish them by unique hardware ID.
+
+### 10.4 Lazy initialization and global state
+
+```python
+def initialize_camera():
+    global camera, camera_status
+
+    if camera is None:
+        camera_id = find_camera()
+        camera = Picamera2(camera_id)
+        camera_status = "IDLE"
+        print("IMX219 camera initialized successfully")
+
+    return camera
+```
+
+The `global` declaration allows the function to reassign the variables defined at module level. The new values persist after the function returns, for as long as the Python process runs. The `if camera is None` check opens the camera only once; later calls reuse the object.
+
+Here, `IDLE` means the camera was opened successfully and no acquisition was started. It is **not** a live hardware-health check. `Picamera2(...)` opens/acquires the camera; image streaming requires further configuration and startup.
+
+### 10.5 Socket creation and listening
 
 ```python
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-```
-
-It binds to the configured address and starts listening:
-
-```python
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind((HOST, PORT))
 server.listen(1)
 ```
 
-### 10.3 Receiving commands
+- `AF_INET` selects IPv4; `SOCK_STREAM` selects TCP.
+- `SO_REUSEADDR` assists with address reuse during some restart scenarios. It does not permit two servers to bind the same active address/port combination.
+- `bind()` assigns the local address and port.
+- `listen(1)` requests a pending-connection backlog of one; it does **not** limit the total number of clients over the server's lifetime.
 
-The server accepts a client connection and receives bytes using:
+### 10.6 Outer and inner loops
 
-```python
-connection, address = server.accept()
-data = connection.recv(1024)
-```
-
-The received bytes are decoded into text:
+The relevant current implementation is:
 
 ```python
-command = data.decode("utf-8").strip()
+try:
+    while True:
+        # Wait for a TCP connection from the IOC
+        connection, address = server.accept()
+        print(f"Connected by {address}")
+
+        while True:
+            # Wait for bytes on the accepted connection
+            data = connection.recv(1024)
+
+            if not data:
+                break
+
+            command = data.decode("utf-8").strip()
+            print(f"Received command: {command}")
+
+            if command == "STATUS?":
+                initialize_camera()
+                response = camera_status + "\n"
+            else:
+                response = "ERROR\n"
+
+            connection.sendall(response.encode("utf-8"))
+
+        connection.close()
+
+except KeyboardInterrupt:
+    print("\nKeyboard interrupt: Stopping camera server")
+
+finally:
+    server.close()
+    if camera is not None:
+        camera.close()
+        print("Camera released")
 ```
 
-The current implementation recognizes:
+**Execution sequence:**
 
-```python
-if command == "STATUS?":
-    response = "IDLE\n"
-else:
-    response = "ERROR\n"
-```
+1. `accept()` blocks until a TCP client connects. Establishing a TCP connection is separate from sending `STATUS?`.
+2. Once accepted, Python enters the inner loop and blocks at `recv()` until data arrives or the connection closes.
+3. On `STATUS?`, Python initializes the camera if needed, prepares `IDLE\n`, and sends it back using `sendall()`.
+4. The inner loop repeats and waits for more data on the **same** connection.
+5. If the client closes its sending direction normally, `recv()` returns the empty **bytes** object `b""`. `if not data: break` exits the inner loop, then `connection.close()` runs.
+6. The outer loop waits for a new connection. It does not exit merely because the IOC disconnected.
+7. Pressing Ctrl+C normally raises `KeyboardInterrupt`, causing the outer `finally` to close the listening socket and camera.
 
-The response is transmitted using:
+The server handles one accepted client at a time. Multiple EPICS CA/PVA clients can still communicate with the **IOC** without each opening a separate Python TCP connection.
 
-```python
-connection.sendall(response.encode("utf-8"))
-```
+### 10.7 Current implementation limitations
 
-### 10.4 Current limitations
+The current code treats each `recv(1024)` result as one complete command. TCP does not guarantee this: commands may be split across reads or combined into a single read. Before expanding the protocol, implement newline-delimited command framing and test repeated commands.
 
-The Python server is intended as an initial communication test.
+The code also does not yet send a structured error response if camera initialization fails; unexpected exceptions may terminate the server. Cleanup of the accepted client socket is not guaranteed on every exceptional path. These are future robustness improvements, not features already implemented.
 
-It handles one active client connection at a time and assumes that a complete command is received in one `recv()` operation.
+## 11. IOC startup — `st.cmd`
 
-For more robust operation, the server should eventually buffer incoming data and process complete newline-terminated messages.
+Source: `iocBoot/iocstreamdevice_camera/st.cmd`.
 
-The server currently returns a fixed `IDLE` response. It does not query Picamera2 or the physical camera.
-
-## 11. IOC Startup — `st.cmd`
-
-The IOC startup script is located at:
-
-```text
-iocBoot/iocstreamdevice_camera/st.cmd
-```
-
-Its essential configuration is:
+The essential startup commands are:
 
 ```text
 dbLoadDatabase "../../dbd/streamdevice_camera.dbd"
 streamdevice_camera_registerRecordDeviceDriver(pdbbase)
 
 drvAsynIPPortConfigure("CAM_PORT", "127.0.0.1:5000", 0, 0, 0)
-
 epicsEnvSet("STREAM_PROTOCOL_PATH", "../../db")
-
-dbLoadRecords("../../db/camera.db", "P=CAM:,R=,PORT=CAM_PORT")
+dbLoadRecords("../../db/camera.db", "P=CAM:,R=,PORT=CAM_PORT,SCAN=1 second")
 
 iocInit()
 ```
 
-### 11.1 Loading and registering support
+The `dbLoadDatabase` and registration commands load the compiled record/device support. `drvAsynIPPortConfigure` defines `CAM_PORT` and points it to the Python TCP listener. `STREAM_PROTOCOL_PATH` locates the installed `.proto` file. `dbLoadRecords` loads the database with macros; `iocInit()` starts IOC operation.
 
-```text
-dbLoadDatabase "../../dbd/streamdevice_camera.dbd"
-streamdevice_camera_registerRecordDeviceDriver(pdbbase)
-```
+**Note on `SCAN`:** The startup macro string shown during testing included `SCAN=1 second`, while the database source shown in this guide sets `SCAN` literally to `Passive`. The macro has no effect unless the database uses `$(SCAN)`. Verify the actual runtime setting before claiming that the IOC is periodically scanning.
 
-These commands load and register the record and device-support definitions compiled into the IOC.
+If the Python service is not running at IOC startup, asyn may report a connection warning. This is separate from CA/PVA availability; start the Python server and check reconnection before diagnosing camera communication.
 
-### 11.2 Configuring asyn TCP/IP
-
-```text
-drvAsynIPPortConfigure("CAM_PORT", "127.0.0.1:5000", 0, 0, 0)
-```
-
-This creates the named asyn communication port `CAM_PORT`.
-
-The port connects to the Python TCP service listening at `127.0.0.1:5000`.
-
-The `.proto` file does not contain the server address. It uses the port configured here.
-
-### 11.3 Protocol search path
-
-```text
-epicsEnvSet("STREAM_PROTOCOL_PATH", "../../db")
-```
-
-This tells StreamDevice where to find the installed protocol file.
-
-### 11.4 Loading records
-
-```text
-dbLoadRecords("../../db/camera.db", "P=CAM:,R=,PORT=CAM_PORT")
-```
-
-This loads the database and supplies its macro values.
-
-### 11.5 IOC initialization
-
-```text
-iocInit()
-```
-
-This initializes the IOC after the support components, communication ports and database records have been configured.
-
-## 12. Building the IOC
+## 12. Build and verify the IOC
 
 From the repository root:
 
 ```bash
 cd epics/streamdevice_camera/streamdevice_camera_ioc
-```
-
-Build:
-
-```bash
 make -j2
 ```
 
-Verify the executable:
+Check the generated executable and installed files:
 
 ```bash
 ls bin/linux-arm/streamdevice_camera
-```
-
-Verify the installed database and protocol:
-
-```bash
 ls db
 ```
 
-Expected:
-
-```text
-camera.db
-stream_camera.proto
-```
-
-The IOC was successfully compiled and linked against EPICS Base, asyn and StreamDevice on the Raspberry Pi.
-
-## 13. Running the System
-
-The Python server and IOC run as separate processes.
-
-### Terminal 1 — Start Python
-
-From the repository root:
+Check that PVA server and QSRV registrations are included:
 
 ```bash
-python3 acquisition/camera_server.py
+grep -i -E 'qsrv|registerStartPVAServer' dbd/streamdevice_camera.dbd
 ```
 
-Expected:
+The working build included:
 
 ```text
-Camera server listening on 127.0.0.1:5000
+registrar(QSRVRegistrar)
+registrar(registerStartPVAServer)
 ```
 
-Leave the server running.
+These registrations show the components are included in the generated IOC DBD. Successful runtime access must still be tested separately.
 
-### Terminal 2 — Start the IOC
+## 13. Run and test the system
 
-Navigate to:
+### Terminal 1 — Python server
+
+From the repository root, run **one** of:
+
+```bash
+# Real camera server
+python3 -u acquisition/picamera2_server.py
+```
+
+or:
+
+```bash
+# Original simulated service
+python3 -u acquisition/camera_server_simulator.py
+```
+
+`-u` makes terminal output unbuffered. The real camera server waits for a command before opening Picamera2. Stop one server before starting the other.
+
+### Terminal 2 — IOC
 
 ```bash
 cd epics/streamdevice_camera/streamdevice_camera_ioc/iocBoot/iocstreamdevice_camera
-```
-
-Run:
-
-```bash
 ./st.cmd
 ```
 
-The startup script uses the executable specified in its first line:
+The startup script's first line points to the built executable:
 
 ```text
 #!../../bin/linux-arm/streamdevice_camera
 ```
 
-If necessary, enable executable permission:
+If needed, restore executable permission with `chmod +x st.cmd`. Wait for the `epics>` prompt and check for startup errors.
 
-```bash
-chmod +x st.cmd
-```
+### Terminal 3 — Read a fresh status
 
-The IOC should initialize and display the `epics>` prompt.
-
-### Terminal 3 — Test the PV
-
-On the Raspberry Pi, request a fresh status:
+With the passive record, explicitly request processing:
 
 ```bash
 caput CAM:GetStatus.PROC 1
 ```
 
-Then read it:
+Then read the stored result using either interface:
 
 ```bash
 caget CAM:GetStatus
+pvget CAM:GetStatus
 ```
 
-Expected:
+After successful processing, the expected status is `IDLE`. Because StreamDevice can process asynchronously, a read issued immediately after the trigger may need to wait for completion to guarantee freshness.
+
+The Python terminal should print `Received command: STATUS?` and, on the first such request, `IMX219 camera initialized successfully`. Later requests reuse the same camera object.
+
+### Shutdown
+
+Stop the IOC from its `epics>` prompt with `exit`. Stop the Python server with Ctrl+C; its shutdown handler closes the listening socket and releases the camera if it was opened.
+
+## 14. Channel Access and PVAccess with QSRV
+
+### 14.1 Why PVAccess initially timed out
+
+`pvget` was installed, and the PVA libraries (`pvAccessIOC`, `pvAccess`, `pvData`) were available, but the IOC initially registered only the PVA server. At runtime it reported:
 
 ```text
-CAM:GetStatus    IDLE
+ServerContext configured with no Providers will do nothing!
 ```
 
-The Python terminal should show:
+TCP port 5075 and UDP port 5076 were open, but `pvget CAM:GetStatus` timed out. The missing piece was the **QSRV IOC database provider**. Adding `qsrv.dbd` and linking `qsrv` exposed the IOC's ordinary records through PVA. The warning disappeared and `pvget` worked.
+
+### 14.2 Build configuration
+
+The required entries in `streamdevice_cameraApp/src/Makefile` are:
+
+```makefile
+streamdevice_camera_DBD += PVAServerRegister.dbd
+streamdevice_camera_DBD += qsrv.dbd
+
+streamdevice_camera_LIBS += qsrv
+streamdevice_camera_LIBS += pvAccessIOC
+streamdevice_camera_LIBS += pvAccess
+streamdevice_camera_LIBS += pvData
+```
+
+They are used alongside `base.dbd`, `asyn.dbd`, `drvAsynIPPort.dbd`, `stream.dbd`, `stream`, `asyn`, and `$(EPICS_BASE_IOC_LIBS)`.
+
+### 14.3 Diagnostics
+
+The PVA server's actual IOC-shell commands in this installation were identified from `PVAServerRegister.cpp`:
 
 ```text
-Received command: STATUS?
+pvasr 1
+pval 1
 ```
 
-This confirms communication through EPICS, StreamDevice, asyn and the Python service.
+`pvasr` reports server information; `pval` lists PVs from registered providers. Other command names attempted during troubleshooting (`pvaSrv`, `pvaServerReport`, `pvaProviderList`) were not registered in this build.
 
-## 14. Understanding On-Demand Status Requests
-
-The `CAM:GetStatus` record uses passive processing.
-
-Therefore, running:
+Default PVA ports in this installation were TCP 5075 and UDP 5076. To inspect sockets on the Raspberry Pi:
 
 ```bash
-caget CAM:GetStatus
+ss -ltnp | grep ':5075'
+ss -lunp | grep ':5076'
 ```
 
-normally reads the value already stored in the EPICS record.
+Open ports alone do not prove that an IOC database provider is registered. A successful `pvget` is the functional test.
 
-It does not necessarily send a new command to Python.
-
-To explicitly request a fresh status:
+### 14.4 Client behavior
 
 ```bash
-caput CAM:GetStatus.PROC 1
+caget CAM:GetStatus    # Channel Access
+pvget CAM:GetStatus    # PVAccess
 ```
 
-The complete sequence is:
+Both access the same IOC record. With `SCAN = Passive`, both normally return the **stored** value; neither automatically sends a fresh `STATUS?` to the Python service. `pvput` is the PVA write counterpart of `caput`, but no new camera-setting PVs have yet been implemented.
+
+## 15. On-demand status: current behavior and open requirement
+
+The distinction between **reading a PV** and **processing a record** is important:
 
 ```text
 caput CAM:GetStatus.PROC 1
-              |
-              v
-      EPICS record processing
-              |
-              v
-       StreamDevice getStatus
-              |
-              v
-       Send STATUS? over TCP
-              |
-              v
-         Python server
-              |
-              v
-         Return IDLE
-              |
-              v
-       Update CAM:GetStatus
+         |
+         v
+   IOC processes record
+         |
+         v
+ StreamDevice sends STATUS?
+         |
+         v
+ Python initializes/uses IMX219
+         |
+         v
+ Returns IDLE; IOC stores result
+         |
+         v
+ caget / pvget read stored value
 ```
 
-A subsequent `caget` reads the updated value.
+`caput ...PROC 1` does not set the camera status to `1`; it asks EPICS to process the record. `caget CAM:GetStatus.PROC` would only read the processing field and would not perform that write.
 
-StreamDevice processing may be asynchronous, so clients requiring a guaranteed fresh result should account for completion rather than assume that every command and readback is instantaneous.
+Setting `PINI = YES` requests processing at IOC initialization; `SCAN = I/O Intr` is for device-support-driven update notifications where implemented; `SCAN = 1 second` causes periodic processing. None of these makes a standard `caget` or `pvget` automatically perform a fresh StreamDevice transaction on each read.
 
-## 15. Remote Access from Windows / WSL
+**Desired behavior (not yet implemented):** One user PV read should trigger a fresh camera-status request and return its result, without manual `.PROC` writes and without continuous polling. We have deliberately not adopted a wrapper command as the final design. A suitable IOC/device-support approach remains to be investigated.
 
-The IOC runs on the Raspberry Pi, but remote EPICS clients can access its PVs through Channel Access.
+## 16. Remote access from Windows / WSL
 
-The development environment uses WSL Linux on Windows.
+The IOC runs on the Raspberry Pi; WSL clients communicate with the IOC, not directly with the loopback-only Python TCP server.
 
-### 15.1 Configure EPICS tools in WSL
-
-A separate EPICS Base installation is available at:
+The WSL EPICS Base installation was located at:
 
 ```text
 ~/EPICS/epics-base
 ```
 
-The WSL environment can be configured with:
+Example shell setup:
 
 ```bash
 export EPICS_BASE="$HOME/EPICS/epics-base"
 export PATH="$EPICS_BASE/bin/linux-x86_64:$PATH"
 ```
 
-### 15.2 Configure IOC discovery
-
-WSL networking may prevent automatic EPICS UDP broadcast discovery.
-
-To specify the Raspberry Pi address explicitly:
+If CA discovery does not find the Raspberry Pi automatically, determine the Pi's current IP using `hostname -I` on the Pi, then in WSL use (example address):
 
 ```bash
 export EPICS_CA_AUTO_ADDR_LIST=NO
 export EPICS_CA_ADDR_LIST=192.168.0.176
 ```
 
-Replace `192.168.0.176` with the Pi's current IP address.
-
-On the Pi, check:
-
-```bash
-hostname -I
-```
-
-### 15.3 Read and process the PV remotely
-
-From WSL:
+Test:
 
 ```bash
 caget CAM:GetStatus
-```
-
-To request a fresh status:
-
-```bash
 caput CAM:GetStatus.PROC 1
 caget CAM:GetStatus
 ```
 
-Remote communication was successfully verified.
+This remote CA configuration was successfully tested. Remote PVA discovery from WSL was not separately verified during this milestone; it may need its own network configuration.
 
-The WSL client communicates with the EPICS IOC, not directly with the Python TCP server.
+## 17. Multiple clients and access considerations
 
-## 16. Multiple Clients and EPICS
+Multiple operator interfaces, scripts and remote terminals can access the IOC over CA or PVA. They do not each need a separate TCP connection to the Python camera service. The current Python implementation handles one accepted TCP client at a time, which is adequate for the intended IOC-to-service connection.
 
-One important motivation for using EPICS is that multiple applications can access the same instrument through a common IOC.
+The Python service binds to `127.0.0.1`, limiting direct remote access to that socket. **This does not restrict access to the EPICS IOC itself.** For deployment beyond a trusted laboratory network, consider IOC access-security rules, firewall restrictions and appropriately secured networking. These protections have not been implemented as part of this milestone.
 
-For example:
+## 18. Current limitations and next development steps
 
-```text
-Operator GUI ──────┐
-                   |
-Python analysis ───┼──> EPICS IOC
-                   |         |
-Remote terminal ───┘         v
-                         StreamDevice
-                              |
-                           asyn TCP
-                              |
-                         Python server
-```
+### Implemented and tested
 
-The EPICS IOC exposes PVs to multiple Channel Access clients.
+- Simulated `STATUS?` response through StreamDevice/asyn.
+- Real IMX219 discovery and opening through Picamera2.
+- Lazy initialization and reuse of a software-held camera object.
+- Repeated TCP command handling on a single accepted connection.
+- Channel Access and PVAccess access to `CAM:GetStatus` using QSRV.
+- Normal Ctrl+C shutdown and camera release.
 
-Those clients do not each require a separate connection to the Python service.
+### Not yet implemented
 
-The current Python server handles one active TCP client at a time, which is sufficient for this initial IOC-to-service architecture.
+- Image capture or saving initiated through EPICS.
+- Exposure-time and analogue-gain readback/control PVs.
+- Accurate acquisition-state transitions and hardware-health monitoring.
+- Robust newline-delimited TCP parsing, recovery and per-client exception cleanup.
+- A fresh status query automatically triggered by a single PV read.
+- Camera image transfer through EPICS or areaDetector.
 
-As the project develops, simultaneous control requests and camera-busy conditions will require explicit handling.
-
-## 17. Current Limitations
-
-The working system demonstrates communication infrastructure only.
-
-Current limitations include:
-
-- The Python service returns a fixed status.
-- Picamera2 is not yet integrated.
-- No physical camera acquisition is performed through EPICS.
-- No image data is exposed through EPICS.
-- No exposure or gain PVs are implemented.
-- TCP command framing and error recovery need improvement.
-- Acquisition state management has not yet been implemented.
-
-## 18. Next Development Steps
-
-The next milestone is to connect the existing Python service to Picamera2 while preserving the EPICS communication interface.
-
-Planned additions include:
-
-- Reading actual camera information.
-- Implementing an acquisition command.
-- Setting exposure and gain.
-- Reporting acquisition status.
-- Saving acquired images.
-- Tracking image counters and errors.
-
-The areaDetector implementation will be developed separately rather than incorporated into this conventional StreamDevice IOC.
+The next development milestone is to implement actual camera acquisition and then introduce exposure/gain controls. The areaDetector approach remains a separate planned implementation, not part of this StreamDevice IOC.
 
 ## 19. References
 
 - [EPICS Documentation](https://docs.epics-controls.org/)
+- [EPICS Base](https://github.com/epics-base/epics-base)
 - [asynDriver](https://github.com/epics-modules/asyn)
 - [StreamDevice](https://github.com/paulscherrerinstitute/StreamDevice)
 - [StreamDevice Documentation](https://paulscherrerinstitute.github.io/StreamDevice/)
 - [Picamera2](https://github.com/raspberrypi/picamera2)
 - [libcamera](https://libcamera.org/)
+- [areaDetector](https://areadetector.github.io/areaDetector/)
 
 ---
 
-**Implementation status:** EPICS-to-Python TCP communication and remote Channel Access have been successfully demonstrated. Picamera2 integration is the next milestone.
+**Implementation status:** Milestone 1 (simulated TCP communication) and the initial Milestone 2 (Picamera2 camera initialization and CA/PVA access through QSRV) have been demonstrated. Image acquisition and on-demand fresh-value semantics remain future work.
