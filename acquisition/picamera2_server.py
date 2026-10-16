@@ -13,6 +13,12 @@ from pathlib import Path
 # Import datetime to generate unique acquisition filenames
 from datetime import datetime
 
+# Import Transform to control camera image orientation
+from libcamera import Transform
+
+# Import math to validate numerical camera settings
+import math
+
 # Define the IP address and port for the TCP server
 HOST = "127.0.0.1"
 PORT = 5000
@@ -39,6 +45,9 @@ auto_exposure = True
 exposure_time = 20000   # Microseconds
 analogue_gain = 1.0     # Unity gain
 
+# Paths of the latest successfully acquired image and metadata
+last_image_path = "NONE"
+last_metadata_path = "NONE"
 
 
 # Find the IMX219 camera and return its camera index
@@ -65,12 +74,12 @@ def update_camera_status(new_status):
 
 # Initialize the IMX219 camera only if it is not already open
 def initialize_camera():
-    global camera, camera_status
+    global camera
 
     if camera is None:
         camera_id = find_camera()
         camera = Picamera2(camera_id)
-        camera_status = update_camera_status("IDLE")
+        update_camera_status("IDLE")
         print("IMX219 camera initialized successfully")
 
     return camera
@@ -100,7 +109,52 @@ def apply_camera_settings(cam):
             "AnalogueGain": analogue_gain
         })
 
+# Update the requested exposure time
+def set_exposure(value):
+    global exposure_time
 
+    # Convert the received value into an integer
+    new_exposure = int(value)
+
+    # Check that the exposure time is positive
+    if new_exposure <= 0:
+        raise ValueError("Exposure time must be positive")
+
+    # Store the validated exposure time
+    exposure_time = new_exposure
+
+    # Apply settings if the camera is already streaming
+    if camera is not None and camera.started:
+        apply_camera_settings(camera)
+
+# Update the requested analogue gain
+def set_gain(value):
+    global analogue_gain
+
+    # Convert the received value into a floating-point number
+    new_gain = float(value)
+
+    # Check that the gain is a finite, positive number
+    if not math.isfinite(new_gain) or new_gain <= 0:
+        raise ValueError("Analogue gain must be a finite, positive number")
+
+    # Store the validated analogue gain
+    analogue_gain = new_gain
+
+    # Apply settings if the camera is already streaming
+    if camera is not None and camera.started:
+        apply_camera_settings(camera)
+
+# Enable or disable automatic exposure
+def set_auto_exposure(value):
+    global auto_exposure
+
+    # Convert the received numerical value to a Boolean
+    auto_exposure = bool(int(value))
+
+    # Apply settings if the camera is already streaming
+    if camera is not None and camera.started:
+        apply_camera_settings(camera)
 
 # Start the camera streaming pipeline
 def start_camera():
@@ -158,6 +212,7 @@ def close_camera():
 
 # Acquire an image and its corresponding metadata
 def acquire_image():
+    global last_image_path, last_metadata_path
 
     # Initially, no capture request exists
     request = None
@@ -234,7 +289,76 @@ def acquire_image():
     else:
         update_camera_status("IDLE")
 
-    return str(image_path)
+    # Store the paths of the latest successful acquisition
+    last_image_path = str(image_path)
+    last_metadata_path = str(metadata_path)
+
+    return str(image_path), str(metadata_path)
+
+
+
+# Process commands received from the EPICS IOC
+def process_command(command):
+
+    try:
+        if command == "STATUS?":
+            return camera_status + "\n"
+
+        elif command == "STATUS_DESC?":
+            return status_messages[camera_status] + "\n"
+
+        elif command == "START":
+            start_camera()
+            return "OK\n"
+
+        elif command == "STOP":
+            stop_camera()
+            return "OK\n"
+
+        elif command == "ACQUIRE":
+            image_path, metadata_path = acquire_image()
+            return "OK\n"
+
+        elif command == "CLOSE":
+            close_camera()
+            return "OK\n"
+
+        elif command.startswith("EXPOSURE "):
+            value = command.split()[1]
+            set_exposure(value)
+            return "OK\n"
+
+        elif command == "EXPOSURE?":
+            return f"{exposure_time}\n"
+
+        elif command.startswith("GAIN "):
+            value = command.split()[1]
+            set_gain(value)
+            return "OK\n"
+
+        elif command == "GAIN?":
+            return f"{analogue_gain}\n"
+
+        elif command.startswith("AUTO_EXPOSURE "):
+            value = command.split()[1]
+            set_auto_exposure(value)
+            return "OK\n"
+
+        elif command == "AUTO_EXPOSURE?":
+            return f"{int(auto_exposure)}\n"
+        
+        elif command == "LATEST_IMAGE_PATH?":
+            return last_image_path + "\n"
+
+        elif command == "LATEST_METADATA_PATH?":
+            return last_metadata_path + "\n"
+
+        else:
+            return "ERROR: Unknown command\n"
+
+    except Exception as error:
+        print(f"Command failed: {error}")
+        return f"ERROR: {error}\n"
 
 
 # Create an IPv4 TCP socket for communication with the EPICS IOC
@@ -255,37 +379,50 @@ try:
         # Wait for IOC connection
         connection, address = server.accept()
         print(f"Connected by {address}")
+        # Create a buffered reader for newline-terminated TCP commands
+        reader = connection.makefile("r", encoding="utf-8")
 
         while True:
-            # Wait for command
-            data = connection.recv(1024)
+            # Wait until a complete newline-terminated command is received
+            data = reader.readline()
 
             if not data:
                 break
 
-            # Process command
-            command = data.decode("utf-8").strip()
+
+            # Remove the newline from the received command
+            command = data.strip()
+
             # Display the command received from the IOC
             print(f"Received command: {command}")
 
-            if command == "STATUS?":
-                initialize_camera()
-                response = camera_status + "\n"
-            else:
-                response = "ERROR\n"
+            # Process the received command
+            response = process_command(command)
 
+            # Send resposne after processing command
             connection.sendall(response.encode("utf-8"))
 
-        # Close connection when IOC disconnects
+        # Close the camera when the IOC disconnects
+        close_camera()
+
+        # Close the buffered reader
+        reader.close()
+
+        # Close the TCP connection
         connection.close()
+
+        print("IOC disconnected")
 
 except KeyboardInterrupt:
     # Handle Ctrl+C from the keyboard
     print("\nKeyboard interrupt: Stopping camera server")
 
+
 finally:
+    # Release camera resources when the Python server shuts down
+    close_camera()
+
+    # Close the TCP server socket
     server.close()
 
-    if camera is not None:
-        camera.close()
-        print("Camera released")
+    print("Camera server stopped")
