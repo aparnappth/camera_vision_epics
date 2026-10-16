@@ -1,30 +1,35 @@
 # StreamDevice Camera IOC — Implementation Guide
 
-This guide documents the conventional EPICS IOC developed for the [EPICS-Controlled Camera Characterization and Vision Platform](../README.md). It covers the original simulated TCP camera service (Milestone 1) and the Picamera2/IMX219 integration with Channel Access (CA) and PVAccess (PVA) support (Milestone 2).
+This guide documents the conventional EPICS IOC developed for the [EPICS-Controlled Camera Characterization and Vision Platform](../README.md). It covers the simulated TCP service, the conventional IOC and its CA/PVA support, standalone Picamera2 acquisition, and the expanded Python TCP camera server tested in October 2026. The new acquisition commands have **not yet been integrated into the IOC database or StreamDevice protocol**.
 
 For dependency installation, see [EPICS Environment Setup](epics_setup.md). For errors encountered during development, see [Troubleshooting](troubleshooting.md).
 
 ## 1. Objective and implementation status
 
-The IOC communicates with a Python TCP service through **asyn** and **StreamDevice**. The Python service runs on a Raspberry Pi Zero 2 W with a Sony IMX219 CSI camera.
+The IOC communicates with a Python TCP service through **asyn** and **StreamDevice** on a Raspberry Pi Zero 2 W with a Sony IMX219 CSI camera. Development separates EPICS integration from direct Python/TCP testing.
 
 ### Milestone 1 — Simulated camera communication
 
-- Created a conventional EPICS IOC using the EPICS Base application templates.
-- Established a TCP command/response interface between StreamDevice and `acquisition/camera_server_simulator.py`.
-- Implemented `STATUS?`, returning a simulated `IDLE` response.
-- Verified local and remote Channel Access from the Raspberry Pi and Windows Subsystem for Linux (WSL).
+- Created a conventional EPICS IOC using EPICS Base templates.
+- Established StreamDevice/asyn TCP communication with `acquisition/camera_server_simulator.py`.
+- Implemented `STATUS?` and verified local and remote Channel Access.
 
-### Milestone 2 — Picamera2 and PVAccess
+### Milestone 2 — Physical camera and PVAccess
 
-- Detected the physical IMX219 through Picamera2 and inspected its properties and controls.
-- Added `acquisition/picamera2_server.py` while retaining the original simulator.
-- Implemented model-name-based discovery and **lazy initialization**: the camera is opened on the first supported `STATUS?` request, not when the TCP server starts.
-- Reused the same camera object for later status requests, and released it on normal keyboard-interrupt shutdown.
-- Enabled PVAccess by linking the PVA server and **QSRV**, which exposes ordinary IOC database records to PVA clients.
-- Verified that both `caget` and `pvget` can access `CAM:GetStatus`.
+- Discovered the IMX219 through Picamera2 and developed `acquisition/picamera2_server.py`, preserving the simulator.
+- Initially opened the camera on `STATUS?`; **this behavior has since been changed** so a status query does not initialize the camera.
+- Linked PVAccess and QSRV, enabling CA and PVA access to the existing `CAM:GetStatus` IOC record.
 
-**Scope of the current implementation:** `IDLE` is a software-maintained state meaning Picamera2 successfully opened the camera. It is not a measurement of ongoing hardware health, and no image capture has yet been implemented through EPICS.
+### Milestone 3 — Standalone and TCP-controlled acquisition
+
+- Tested a standalone Picamera2 script at `acquisition/tests/test_camera_acquisition.py`.
+- Captured JPEG and JSON metadata from the **same completed request**, with timestamp-matched filenames.
+- Tested manual exposure and analogue gain against frame metadata.
+- Implemented and tested TCP commands for camera lifecycle, settings, acquisition and latest file paths using Netcat.
+- Verified single acquisition (returning to `IDLE`) and repeated acquisition while already `STREAMING`.
+- Added centralized status changes, line-delimited TCP input, basic error handling and cleanup on detected disconnection.
+
+**Verified boundary:** The expanded Python server is working over direct TCP. The IOC's `camera.db` and `stream_camera.proto` still describe the earlier status-only interface; the new commands have **not yet been tested through EPICS**.
 
 ## 2. Communication architecture
 
@@ -67,13 +72,17 @@ camera_vision_epics/
 ├── README.md
 ├── acquisition/
 │   ├── camera_server_simulator.py
-│   └── picamera2_server.py
+│   ├── picamera2_server.py
+│   ├── tests/
+│   │   └── test_camera_acquisition.py
+│   └── images/   # generated files, ignored by Git
 ├── docs/
 │   ├── epics_setup.md
 │   ├── streamdevice_ioc.md
 │   ├── troubleshooting.md
 │   └── notes/
-│       └── epics_device_integration.md
+│       ├── epics_device_integration.md
+│       └── test_picamera2_acquisition.md
 └── epics/
     └── streamdevice_camera/
         └── streamdevice_camera_ioc/
@@ -187,7 +196,7 @@ record(stringin, "$(P)$(R)GetStatus") {
 }
 ```
 
-- `stringin` stores a string returned by the service, such as `IDLE`.
+- `stringin` stores a string returned by the service, such as `CLOSED` or `IDLE`.
 - `DTYP = stream` selects StreamDevice record support.
 - `INP` identifies the protocol file, operation name and asyn port.
 - `SCAN = Passive` means the IOC does not poll this record periodically; processing must be triggered explicitly or by another supported processing mechanism.
@@ -227,7 +236,7 @@ The exchange is:
 
 ```text
 IOC → Python: STATUS?\n
-Python → IOC: IDLE\n
+Python → IOC: CLOSED\n  (before the first camera operation, with the current server)
 ```
 
 The record chooses the operation, the `.proto` file defines the wire format, and Python implements the command. TCP is a byte stream; a newline is the protocol's intended command delimiter.
@@ -258,149 +267,146 @@ stream_camera.proto
 
 ## 10. Python TCP camera services
 
-Both services listen on the same local address:
+Both Python services bind to `127.0.0.1:5000`. Run only one at a time. Loopback binding limits direct TCP access to the Pi; remote CA/PVA clients connect to the IOC.
 
-```python
-HOST = "127.0.0.1"
-PORT = 5000
-```
+### 10.1 Simulator and standalone test
 
-Only one can run on that address and port at a time. Binding to `127.0.0.1` prevents direct TCP connections to this Python service from other computers; remote EPICS clients connect to the IOC instead.
+`acquisition/camera_server_simulator.py` implements the original fixed `STATUS?` response (`IDLE\n`) without camera hardware. `acquisition/tests/test_camera_acquisition.py` independently tests still configuration, 180-degree rotation, manual exposure/gain, JPEG capture, matching metadata and resource release. See [Standalone Picamera2 Acquisition Test](notes/test_picamera2_acquisition.md).
 
-### 10.1 Simulator
+### 10.2 Camera state and centralized status updates
 
-`acquisition/camera_server_simulator.py` is the Milestone 1 implementation. It receives `STATUS?` and responds with a fixed value:
-
-```python
-response = "IDLE\n"
-```
-
-It does not use Picamera2. Keep it as a way to test the IOC and StreamDevice communication independently of the camera.
-
-### 10.2 Real Picamera2 service: initial state
-
-`acquisition/picamera2_server.py` imports:
-
-```python
-from picamera2 import Picamera2
-import socket
-```
-
-The server starts with:
+The real server starts with:
 
 ```python
 camera = None
 camera_status = "CLOSED"
+auto_exposure = True
+exposure_time = 20000   # microseconds
+analogue_gain = 1.0
+last_image_path = "NONE"
+last_metadata_path = "NONE"
 ```
 
-`None` means no camera object has been created. Starting the TCP server alone does not open the IMX219.
+`update_camera_status(new_status)` changes the global `camera_status` only if the state differs. Status values are application-maintained, not independent hardware-health measurements.
 
-### 10.3 Finding the camera by model name
+| State | Meaning |
+|---|---|
+| `CLOSED` | Camera object is not initialized |
+| `IDLE` | Initialized, not streaming |
+| `STREAMING` | `camera.start()` is active; frames are produced without necessarily being displayed |
+| `ACQUIRING` | Acquisition operation is in progress |
+| `PREVIEWING` | Reserved for future live-preview integration |
+| `ERROR` | A camera operation failed |
+
+`STATUS?` reports the current state **without opening the camera**; `STATUS_DESC?` returns its explanation. The TCP server processes commands sequentially, so an `ACQUIRING` state is not necessarily observable through a second query until acquisition completes.
+
+### 10.3 Camera discovery and lifecycle functions
+
+`find_camera()` searches `Picamera2.global_camera_info()` for a model named `imx219`. `initialize_camera()` opens it only when `camera is None` and returns the existing object otherwise. The functions use the global name `camera` for the retained object and `cam` for local references or function parameters.
+
+| Function | Responsibility |
+|---|---|
+| `initialize_camera()` | Find and open camera if needed; set `IDLE` |
+| `configure_camera(cam)` | Create/apply still configuration with `Transform(hflip=1, vflip=1)` |
+| `apply_camera_settings(cam)` | Apply automatic exposure, or manual exposure and gain |
+| `start_camera()` | Initialize, configure, apply settings and start if not already streaming; set `STREAMING` |
+| `stop_camera()` | Stop an active stream without closing the camera; set `IDLE` |
+| `close_camera()` | Stop if needed, close, reset global object and set `CLOSED` |
+| `acquire_image()` | Capture, save matched files, release request, restore streaming condition |
+
+`Picamera2(...)` opens the camera, `configure()` prepares the pipeline, `start()` begins producing frames, `capture_request()` obtains a completed frame and metadata, `stop()` stops streaming, and `close()` releases the camera. `START` alone does **not** provide a visible preview.
+
+### 10.4 Exposure and gain control
+
+The server stores requested exposure time in microseconds, requested analogue gain as a floating-point value and automatic-exposure mode as a Boolean. Setting these values while the camera is closed does not open it. If streaming, the setter reapplies camera controls.
 
 ```python
-def find_camera():
-    cameras = Picamera2.global_camera_info()
-
-    for cam in cameras:
-        if cam["Model"] == "imx219":
-            return cam["Num"]
-
-    raise RuntimeError("IMX219 camera not found")
+if auto_exposure:
+    cam.set_controls({"AeEnable": True})
+else:
+    cam.set_controls({
+        "AeEnable": False,
+        "ExposureTime": exposure_time,
+        "AnalogueGain": analogue_gain,
+    })
 ```
 
-This searches Picamera2's discovered cameras and returns the index of the first IMX219. It raises an error if none is found. If several IMX219 cameras are present, this approach does not distinguish them by unique hardware ID.
+`set_exposure()` rejects nonpositive or noninteger input; `set_gain()` rejects nonpositive, nonfinite or nonnumeric input. `set_auto_exposure()` maps `1` to enabled and `0` to disabled; the future EPICS enum record is intended to expose the labels **Enable** and **Disable**. The Python readbacks report **requested** settings, not measured settings. Actual frame settings are saved in JSON metadata. Sensor-specific range validation is not yet complete.
 
-### 10.4 Lazy initialization and global state
+### 10.5 Image acquisition and state restoration
+
+`acquire_image()` records whether the camera was already streaming, initializes/starts it if needed, and sets `ACQUIRING`. It generates an output directory and timestamp-matched filenames, then uses a single completed Picamera2 request:
 
 ```python
-def initialize_camera():
-    global camera, camera_status
-
-    if camera is None:
-        camera_id = find_camera()
-        camera = Picamera2(camera_id)
-        camera_status = "IDLE"
-        print("IMX219 camera initialized successfully")
-
-    return camera
+request = camera.capture_request()
+request.save("main", str(image_path))
+metadata = request.get_metadata()
+with open(metadata_path, "w") as file:
+    json.dump(metadata, file, indent=4, default=str)
 ```
 
-The `global` declaration allows the function to reassign the variables defined at module level. The new values persist after the function returns, for as long as the Python process runs. The `if camera is None` check opens the camera only once; later calls reuse the object.
+The actual implementation wraps startup, capture and saving in `try`/`except`/`finally`. `finally` releases the request if created and stops streaming if acquisition started it. On successful completion, the status becomes `IDLE` if acquisition started streaming, or returns to `STREAMING` if streaming was already active. On an acquisition failure, the function sets `ERROR` and propagates the exception to the command handler.
 
-Here, `IDLE` means the camera was opened successfully and no acquisition was started. It is **not** a live hardware-health check. `Picamera2(...)` opens/acquires the camera; image streaming requires further configuration and startup.
+Only after a successful acquisition are `last_image_path` and `last_metadata_path` updated. The function returns **both** paths as a tuple. Output is stored in `acquisition/images/` as:
 
-### 10.5 Socket creation and listening
+```text
+image_YYYYMMDD_HHMMSS_microseconds.jpg
+image_YYYYMMDD_HHMMSS_microseconds_metadata.json
+```
+
+The filename timestamp is a host-side identifier; sensor timestamps remain in the metadata. The JPEG is processed image data, not raw Bayer data.
+
+### 10.6 Supported TCP command interface (tested directly)
+
+| Command | Response or effect |
+|---|---|
+| `STATUS?` | Current state |
+| `STATUS_DESC?` | Human-readable state description |
+| `START` | Initialize/configure/start; `OK` |
+| `STOP` | Stop streaming, retain camera; `OK` |
+| `CLOSE` | Release camera; `OK` |
+| `ACQUIRE` | Save JPEG + metadata; `OK` after completion |
+| `EXPOSURE <microseconds>` / `EXPOSURE?` | Set/read requested exposure |
+| `GAIN <value>` / `GAIN?` | Set/read requested analogue gain |
+| `AUTO_EXPOSURE 0` / `AUTO_EXPOSURE 1` | Disable/enable AE |
+| `AUTO_EXPOSURE?` | Return `0` or `1` |
+| `LATEST_IMAGE_PATH?` | Last successful JPEG path, or `NONE` |
+| `LATEST_METADATA_PATH?` | Last successful JSON path, or `NONE` |
+
+`process_command(command)` dispatches these operations and returns newline-terminated responses. Basic exceptions are caught and returned as `ERROR: ...\n`; the command loop remains available for subsequent requests in normal recoverable cases. Unknown commands return an error. Full fault recovery is not yet implemented.
+
+### 10.7 TCP socket, framing and cleanup
+
+The server creates an IPv4 TCP listening socket, sets `SO_REUSEADDR`, binds to `127.0.0.1:5000`, and calls `listen(1)`. The outer loop waits at `accept()` for one active client; the inner loop processes commands on that connection.
+
+The original `recv(1024)` assumed one read equaled one command. The updated server uses a text reader:
 
 ```python
-server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-server.bind((HOST, PORT))
-server.listen(1)
+reader = connection.makefile("r", encoding="utf-8")
+while True:
+    data = reader.readline()
+    if not data:
+        break
+    command = data.strip()
+    response = process_command(command)
+    connection.sendall(response.encode("utf-8"))
 ```
 
-- `AF_INET` selects IPv4; `SOCK_STREAM` selects TCP.
-- `SO_REUSEADDR` assists with address reuse during some restart scenarios. It does not permit two servers to bind the same active address/port combination.
-- `bind()` assigns the local address and port.
-- `listen(1)` requests a pending-connection backlog of one; it does **not** limit the total number of clients over the server's lifetime.
+`readline()` waits for a newline and handles TCP splitting/combining bytes into arbitrary chunks. The text reader already decodes UTF-8: **do not call `data.decode()`** on its returned string. Each Python response includes `\n`, matching the StreamDevice `Terminator = LF` convention.
 
-### 10.6 Outer and inner loops
+On a detected TCP disconnection, the server calls `close_camera()`, closes the reader and client socket, and waits for a new client. On server shutdown, the outer `finally` closes the camera and listening socket. Unexpected socket failures and silent network disconnections are not yet comprehensively handled.
 
-The relevant current implementation is:
+### 10.8 Direct TCP tests completed
 
-```python
-try:
-    while True:
-        # Wait for a TCP connection from the IOC
-        connection, address = server.accept()
-        print(f"Connected by {address}")
+The server was tested with Netcat on the Pi, independently of the IOC:
 
-        while True:
-            # Wait for bytes on the accepted connection
-            data = connection.recv(1024)
-
-            if not data:
-                break
-
-            command = data.decode("utf-8").strip()
-            print(f"Received command: {command}")
-
-            if command == "STATUS?":
-                initialize_camera()
-                response = camera_status + "\n"
-            else:
-                response = "ERROR\n"
-
-            connection.sendall(response.encode("utf-8"))
-
-        connection.close()
-
-except KeyboardInterrupt:
-    print("\nKeyboard interrupt: Stopping camera server")
-
-finally:
-    server.close()
-    if camera is not None:
-        camera.close()
-        print("Camera released")
+```bash
+python3 -u acquisition/picamera2_server.py
+# In another terminal:
+nc 127.0.0.1 5000
 ```
 
-**Execution sequence:**
-
-1. `accept()` blocks until a TCP client connects. Establishing a TCP connection is separate from sending `STATUS?`.
-2. Once accepted, Python enters the inner loop and blocks at `recv()` until data arrives or the connection closes.
-3. On `STATUS?`, Python initializes the camera if needed, prepares `IDLE\n`, and sends it back using `sendall()`.
-4. The inner loop repeats and waits for more data on the **same** connection.
-5. If the client closes its sending direction normally, `recv()` returns the empty **bytes** object `b""`. `if not data: break` exits the inner loop, then `connection.close()` runs.
-6. The outer loop waits for a new connection. It does not exit merely because the IOC disconnected.
-7. Pressing Ctrl+C normally raises `KeyboardInterrupt`, causing the outer `finally` to close the listening socket and camera.
-
-The server handles one accepted client at a time. Multiple EPICS CA/PVA clients can still communicate with the **IOC** without each opening a separate Python TCP connection.
-
-### 10.7 Current implementation limitations
-
-The current code treats each `recv(1024)` result as one complete command. TCP does not guarantee this: commands may be split across reads or combined into a single read. Before expanding the protocol, implement newline-delimited command framing and test repeated commands.
-
-The code also does not yet send a structured error response if camera initialization fails; unexpected exceptions may terminate the server. Cleanup of the accepted client socket is not guaranteed on every exceptional path. These are future robustness improvements, not features already implemented.
+Tests confirmed `CLOSED → STREAMING → IDLE → CLOSED`, requested-setting write/readback, automatic-exposure switching, a successful `ACQUIRE` returning to `IDLE`, valid matching JPEG/JSON metadata, latest-file-path readbacks, and repeated acquisitions that preserve `STREAMING` until `STOP`. These tests do **not** establish that the new commands work through EPICS yet.
 
 ## 11. IOC startup — `st.cmd`
 
@@ -460,21 +466,15 @@ These registrations show the components are included in the generated IOC DBD. S
 
 ### Terminal 1 — Python server
 
-From the repository root, run **one** of:
+From the repository root, run **one** service:
 
 ```bash
-# Real camera server
 python3 -u acquisition/picamera2_server.py
-```
-
-or:
-
-```bash
-# Original simulated service
+# OR, for the original simulator:
 python3 -u acquisition/camera_server_simulator.py
 ```
 
-`-u` makes terminal output unbuffered. The real camera server waits for a command before opening Picamera2. Stop one server before starting the other.
+Only one process can bind port 5000. The real server starts with camera state `CLOSED` and does not initialize the camera merely to answer `STATUS?`.
 
 ### Terminal 2 — IOC
 
@@ -483,36 +483,42 @@ cd epics/streamdevice_camera/streamdevice_camera_ioc/iocBoot/iocstreamdevice_cam
 ./st.cmd
 ```
 
-The startup script's first line points to the built executable:
+The startup script invokes `../../bin/linux-arm/streamdevice_camera`. If needed, use `chmod +x st.cmd`. Confirm the `epics>` prompt.
 
-```text
-#!../../bin/linux-arm/streamdevice_camera
-```
+### Terminal 3 — Existing EPICS status record
 
-If needed, restore executable permission with `chmod +x st.cmd`. Wait for the `epics>` prompt and check for startup errors.
-
-### Terminal 3 — Read a fresh status
-
-With the passive record, explicitly request processing:
+The database still uses `SCAN = Passive`; to request processing, run:
 
 ```bash
 caput CAM:GetStatus.PROC 1
-```
-
-Then read the stored result using either interface:
-
-```bash
 caget CAM:GetStatus
 pvget CAM:GetStatus
 ```
 
-After successful processing, the expected status is `IDLE`. Because StreamDevice can process asynchronously, a read issued immediately after the trigger may need to wait for completion to guarantee freshness.
+With the **current Python server**, a status query before camera initialization returns `CLOSED`, not `IDLE`. A subsequent successful camera operation can change that status, but the IOC record will only reflect a new value after processing. StreamDevice processing can be asynchronous, so immediate reads may not guarantee freshness.
 
-The Python terminal should print `Received command: STATUS?` and, on the first such request, `IMX219 camera initialized successfully`. Later requests reuse the same camera object.
+**Do not attempt the new camera commands through EPICS yet:** the corresponding `camera.db` records and `.proto` operations are pending.
+
+### Direct Python/TCP tests
+
+Run `nc 127.0.0.1 5000` in a separate terminal while the Python server is running. Send one command per line; for example:
+
+```text
+STATUS?
+AUTO_EXPOSURE 0
+EXPOSURE 20000
+GAIN 1.0
+ACQUIRE
+STATUS?
+LATEST_IMAGE_PATH?
+LATEST_METADATA_PATH?
+```
+
+This exercises the expanded server without involving the IOC. `ACQUIRE` returns `OK` only after saving completes. Inspect matching files under `acquisition/images/` and verify actual settings in the JSON metadata.
 
 ### Shutdown
 
-Stop the IOC from its `epics>` prompt with `exit`. Stop the Python server with Ctrl+C; its shutdown handler closes the listening socket and releases the camera if it was opened.
+Stop the IOC with `exit` at `epics>` and the Python server with Ctrl+C. Detected IOC TCP disconnection closes the camera; the server continues waiting for a new connection.
 
 ## 14. Channel Access and PVAccess with QSRV
 
@@ -569,36 +575,21 @@ caget CAM:GetStatus    # Channel Access
 pvget CAM:GetStatus    # PVAccess
 ```
 
-Both access the same IOC record. With `SCAN = Passive`, both normally return the **stored** value; neither automatically sends a fresh `STATUS?` to the Python service. `pvput` is the PVA write counterpart of `caput`, but no new camera-setting PVs have yet been implemented.
+Both access the same IOC record. With `SCAN = Passive`, both normally return the **stored** value; neither automatically sends a fresh `STATUS?` to Python. `pvput` is the PVA write counterpart of `caput`. Camera-setting commands exist in the Python TCP server but the corresponding IOC PVs have not yet been added.
 
-## 15. On-demand status: current behavior and open requirement
+## 15. Passive readback, I/O Intr and on-demand status
 
-The distinction between **reading a PV** and **processing a record** is important:
+A normal `caget CAM:GetStatus` or `pvget CAM:GetStatus` reads the **IOC's stored record value**; it does not automatically send `STATUS?` to Python. To trigger the current passive record explicitly:
 
-```text
+```bash
 caput CAM:GetStatus.PROC 1
-         |
-         v
-   IOC processes record
-         |
-         v
- StreamDevice sends STATUS?
-         |
-         v
- Python initializes/uses IMX219
-         |
-         v
- Returns IDLE; IOC stores result
-         |
-         v
- caget / pvget read stored value
 ```
 
-`caput ...PROC 1` does not set the camera status to `1`; it asks EPICS to process the record. `caget CAM:GetStatus.PROC` would only read the processing field and would not perform that write.
+That write processes the record; it does not set the status to `1`. With the expanded server, the Python `STATUS?` command reports the current software state without initializing the camera.
 
-Setting `PINI = YES` requests processing at IOC initialization; `SCAN = I/O Intr` is for device-support-driven update notifications where implemented; `SCAN = 1 second` causes periodic processing. None of these makes a standard `caget` or `pvget` automatically perform a fresh StreamDevice transaction on each read.
+`PINI = YES` can process at IOC startup, periodic `SCAN` values cause polling, and `SCAN = "I/O Intr"` requires suitable device-support/event notification. **Changing `SCAN` to I/O Intr alone does not make Python status changes automatically appear in EPICS.** A notification mechanism compatible with StreamDevice/asyn and the chosen protocol must first be designed and tested; unsolicited messages must not corrupt request-response parsing.
 
-**Desired behavior (not yet implemented):** One user PV read should trigger a fresh camera-status request and return its result, without manual `.PROC` writes and without continuous polling. We have deliberately not adopted a wrapper command as the final design. A suitable IOC/device-support approach remains to be investigated.
+**Open requirement:** Provide event-driven status/readback updates without periodic polling, and investigate fresh-on-read semantics separately. A single ordinary CA/PVA PV read does not inherently force a hardware transaction. The expanded Python server centralizes state changes in `update_camera_status()` to simplify future notification integration.
 
 ## 16. Remote access from Windows / WSL
 
@@ -644,23 +635,31 @@ The Python service binds to `127.0.0.1`, limiting direct remote access to that s
 
 ### Implemented and tested
 
-- Simulated `STATUS?` response through StreamDevice/asyn.
-- Real IMX219 discovery and opening through Picamera2.
-- Lazy initialization and reuse of a software-held camera object.
-- Repeated TCP command handling on a single accepted connection.
-- Channel Access and PVAccess access to `CAM:GetStatus` using QSRV.
-- Normal Ctrl+C shutdown and camera release.
+- Simulated `STATUS?` through StreamDevice/asyn and local/remote Channel Access.
+- Existing IOC status record exposed through CA and PVA using QSRV.
+- Physical IMX219 discovery and standalone JPEG + matching JSON acquisition.
+- Expanded Python TCP interface: camera lifecycle, settings, status, capture and latest-path readbacks.
+- Newline-delimited input parsing, basic command errors and cleanup on detected disconnect.
+- Direct Netcat tests of single and repeated acquisition with metadata verification.
 
-### Not yet implemented
+### Pending EPICS integration
 
-- Image capture or saving initiated through EPICS.
-- Exposure-time and analogue-gain readback/control PVs.
-- Accurate acquisition-state transitions and hardware-health monitoring.
-- Robust newline-delimited TCP parsing, recovery and per-client exception cleanup.
-- A fresh status query automatically triggered by a single PV read.
-- Camera image transfer through EPICS or areaDetector.
+- Add the new commands to `stream_camera.proto`, including suitable request/response formats.
+- Add readback and control records to `camera.db` (`GetStatus`, `GetStatusDescription`, `GetExposure`, `SetExposure`, `GetGain`, `SetGain`, `GetAutoExposure`, `SetAutoExposure`, `Start`, `Stop`, `Acquire`, `Close`, `GetLatestImagePath`, `GetLatestMetadataPath`).
+- Select appropriate EPICS record types and sufficiently long storage for full file paths; standard `stringin` may be too short.
+- Test the full workflow through `caput`/`caget` and `pvput`/`pvget`.
+- Design and test I/O Intr/event-driven readback updates without confusing them with on-demand PV reads.
 
-The next development milestone is to implement actual camera acquisition and then introduce exposure/gain controls. The areaDetector approach remains a separate planned implementation, not part of this StreamDevice IOC.
+### Longer-term limitations
+
+- One active TCP client and sequential blocking acquisition; no live status query during blocking capture.
+- Software-maintained state rather than independent sensor-health monitoring.
+- Incomplete recovery for exceptional socket/camera failures and silent disconnects.
+- Requested-setting readbacks, with actual settings recorded in metadata.
+- JPEG files on the Pi rather than EPICS image arrays or raw sensor data.
+- Preview integration and areaDetector remain future work.
+
+The next implementation task is to update **`stream_camera.proto` and `camera.db`** and test the expanded EPICS interface. Keep the tested Python server and earlier IOC build configuration as reproducible checkpoints.
 
 ## 19. References
 
@@ -675,4 +674,4 @@ The next development milestone is to implement actual camera acquisition and the
 
 ---
 
-**Implementation status:** Milestone 1 (simulated TCP communication) and the initial Milestone 2 (Picamera2 camera initialization and CA/PVA access through QSRV) have been demonstrated. Image acquisition and on-demand fresh-value semantics remain future work.
+**Implementation status (16 October 2026):** The original IOC status interface works over CA and PVA; standalone and TCP-controlled IMX219 image acquisition with matched metadata have been tested. Expanded EPICS acquisition PVs, event-driven updates and fresh-on-read behavior remain pending.
