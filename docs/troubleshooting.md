@@ -314,7 +314,7 @@ The IOC status request worked, and the IMX219 initialized, but the Python termin
 
 **Cause and solution**
 
-The running code initially lacked the diagnostic print statement. Add it after decoding the command:
+The running code initially lacked the diagnostic print statement. In the original `recv()` implementation, it was added after decoding the command:
 
 ```python
 command = data.decode("utf-8").strip()
@@ -335,7 +335,7 @@ Received command: STATUS?
 IMX219 camera initialized successfully
 ```
 
-The camera initialization message appears only on the first successful initialization in a server session, while the command message appears for each received request.
+In the original implementation, the camera initialization message appeared on the first `STATUS?` request. The current server instead initializes the camera only when a camera operation requires it; `STATUS?` simply reports the maintained state.
 
 ## 13. PVAccess Client Timed Out While Channel Access Worked
 
@@ -515,7 +515,7 @@ With:
 field(SCAN, "1 second")
 ```
 
-the IOC would poll the Python service periodically even when no user requests status. Because the Python handler calls `initialize_camera()` for `STATUS?`, periodic scanning can also open the camera without an explicit client read.
+the IOC would poll the Python service periodically even when no user requests status. In the original server, `STATUS?` called `initialize_camera()`, so periodic scanning could also open the camera. The current Python server no longer initializes on `STATUS?`.
 
 **Desired behavior**
 
@@ -560,18 +560,112 @@ git status
 
 The original simulated server was renamed from `acquisition/camera_server.py` to `acquisition/camera_server_simulator.py` and preserved as a separate reference implementation.
 
-## 18. Future Troubleshooting Topics
+## 18. TCP Reader Decoding Error After Switching to `readline()`
+
+**Observed error**
+
+```text
+AttributeError: 'str' object has no attribute 'decode'. Did you mean: 'encode'?
+```
+
+The traceback occurred at:
+
+```python
+command = data.decode("utf-8").strip()
+```
+
+**Cause**
+
+The original server used `connection.recv(1024)`, which returns bytes and therefore requires decoding. The revised server uses a text-mode socket reader:
+
+```python
+reader = connection.makefile("r", encoding="utf-8")
+data = reader.readline()
+```
+
+`readline()` already returns a Python string because the reader decodes incoming bytes. Calling `.decode()` again raises `AttributeError`.
+
+**Solution**
+
+```python
+command = data.strip()
+```
+
+Retain `connection.sendall(response.encode("utf-8"))` for outgoing responses, because `sendall()` expects bytes. After this correction, the `STATUS?` TCP test returned `CLOSED` without opening the camera.
+
+## 19. TCP Command Framing and Terminators
+
+**Potential issue investigated**
+
+A single `recv(1024)` call is not guaranteed to return exactly one command. TCP is a byte stream: a command may arrive in pieces, or several commands may arrive in one read.
+
+**Implementation**
+
+The server now reads newline-delimited commands using:
+
+```python
+reader = connection.makefile("r", encoding="utf-8")
+data = reader.readline()
+if not data:
+    break
+command = data.strip()
+response = process_command(command)
+connection.sendall(response.encode("utf-8"))
+```
+
+StreamDevice uses `Terminator = LF` in the existing protocol. Each Python response also ends with `\n`. This establishes explicit message boundaries in both directions. A missing terminator can leave a reader waiting for a complete message.
+
+**Verification**
+
+The revised server successfully processed sequential commands over a persistent Netcat TCP connection. This does not yet establish that the expanded EPICS StreamDevice protocol works; its command definitions remain to be updated.
+
+**Remaining limitation:** `readline()` may wait indefinitely if a client sends no newline and keeps the connection open. Socket timeouts and exceptional-path connection cleanup remain future robustness work.
+
+## 20. Camera State and Command Validation
+
+**Behavior clarified during development**
+
+`STATUS?` no longer initializes the camera. It returns the current application-maintained state, initially `CLOSED`. Camera operations such as `START` and `ACQUIRE` initialize the physical camera on demand.
+
+The server uses `update_camera_status()` to manage transitions among `CLOSED`, `IDLE`, `STREAMING`, `ACQUIRING`, and `ERROR`. `PREVIEWING` is reserved for future functionality. A status is a software state, not an independent hardware-health measurement.
+
+**Input validation**
+
+Exposure is converted using `int()` and must be positive. Gain is converted using `float()` and checked to be finite and positive. Invalid strings such as `EXPOSURE abc` raise `ValueError`; invalid numerical settings are rejected before replacing stored requested values. The command handler catches ordinary exceptions and returns newline-terminated `ERROR:` responses instead of allowing them to terminate the TCP command loop.
+
+Automatic exposure is represented as `1` for enabled and `0` for disabled. Named EPICS state selection is planned through a suitable output record; this is not yet implemented in the IOC.
+
+**Remaining limitations:** Numeric validity is not the same as validation against the IMX219's supported control ranges. Command failure handling and hardware recovery require additional testing.
+
+## 21. Image Acquisition and Resource Cleanup
+
+**Verified behavior**
+
+The Python TCP server successfully handled `ACQUIRE` with manual exposure and gain, saved timestamped JPEG/JSON pairs from the same Picamera2 completed request, and returned their paths through `LATEST_IMAGE_PATH?` and `LATEST_METADATA_PATH?`.
+
+The camera was tested in two modes:
+
+- A single acquisition starting from a stopped camera returned to `IDLE` afterward, while leaving the camera initialized.
+- Repeated acquisition while already streaming returned to `STREAMING` after each successful capture and produced distinct file pairs.
+
+The acquisition function releases its completed request in `finally`. If the acquisition itself started streaming, cleanup stops that streaming after completion or a handled error. A camera that was already streaming is normally left streaming. `CLOSE`, detected TCP disconnection, and normal server shutdown use centralized camera cleanup.
+
+**Important distinction:** The latest-path commands return file paths on the Raspberry Pi, not image bytes or JSON contents. Requested exposure/gain readbacks are also different from the actual values recorded in image metadata.
+
+**Remaining limitations:** The tests demonstrated successful acquisitions, not exhaustive camera-error recovery. Unexpected disconnections, partial file writes, camera-busy failures, and automatic EPICS I/O Intr notifications remain open areas.
+
+## 22. Future Troubleshooting Topics
 
 As development continues, this guide will expand to cover:
 
 - Camera initialization failures and device-busy conditions.
-- Actual image acquisition and acquisition timeouts.
-- Exposure and analogue-gain control.
-- Image saving and metadata handling.
-- TCP message framing, unexpected disconnects and recovery.
+- Acquisition timeouts and recovery (single and repeated image acquisition now work in Python TCP tests).
+- Exposure and analogue-gain sensor-range validation and failure recovery (basic Python TCP control is tested).
+- Image-saving failures, partial files and metadata consistency (successful paired JPEG/JSON saving is tested).
+- Unexpected TCP disconnects and recovery (newline framing is now implemented).
 - EPICS alarm states and hardware-health reporting.
 - On-demand fresh PV read behavior without continuous polling.
 
 ---
 
-**Documentation status:** Covers the Milestone 1 simulated TCP service and Milestone 2 Picamera2 initialization, Channel Access and PVAccess/QSRV integration. Image acquisition and advanced camera controls remain planned.
+**Documentation status:** Covers the original EPICS/StreamDevice and CA/PVA troubleshooting, plus Python TCP camera-control and acquisition tests. The expanded commands are verified directly over TCP but have not yet been integrated into the EPICS `.proto` and `.db` files.
