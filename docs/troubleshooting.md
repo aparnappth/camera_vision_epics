@@ -174,11 +174,11 @@ First verify the PV locally on the Pi. Find the Pi's IP address:
 hostname -I
 ```
 
-In WSL, set the discovery address (replace the example with the current Pi IP):
+In WSL, set the discovery address (replace the documentation-only example address with the current Pi IP):
 
 ```bash
 export EPICS_CA_AUTO_ADDR_LIST=NO
-export EPICS_CA_ADDR_LIST=192.168.0.176
+export EPICS_CA_ADDR_LIST=192.0.2.10
 ```
 
 Test:
@@ -194,7 +194,7 @@ Remote Channel Access was successfully established using explicit address config
 **Error**
 
 ```text
--bash: export: `192.168.0.176': not a valid identifier
+-bash: export: `192.0.2.10': not a valid identifier
 ```
 
 **Cause**
@@ -202,7 +202,7 @@ Remote Channel Access was successfully established using explicit address config
 A space was inserted after `=`:
 
 ```bash
-export EPICS_CA_ADDR_LIST= 192.168.0.176
+export EPICS_CA_ADDR_LIST= 192.0.2.10
 ```
 
 **Solution**
@@ -210,7 +210,7 @@ export EPICS_CA_ADDR_LIST= 192.168.0.176
 Use an assignment with no spaces around `=`:
 
 ```bash
-export EPICS_CA_ADDR_LIST=192.168.0.176
+export EPICS_CA_ADDR_LIST=192.0.2.10
 ```
 
 ## 8. EPICS Commands Not Found in WSL
@@ -489,7 +489,7 @@ python3 acquisition/camera_server_simulator.py
 
 Only one may bind to `127.0.0.1:5000` at a time. A PVA client may still read a stored IOC PV even when the underlying camera service is unavailable; successful PV discovery does not prove hardware communication.
 
-## 16. Passive Status Reads Versus Periodic Polling — Open Design Issue
+## 16. Passive Status Reads Versus Event-Driven Monitoring — Historical Investigation
 
 **Observed behavior**
 
@@ -523,7 +523,7 @@ A single user PV read should obtain a fresh status without periodic polling or a
 
 **Status**
 
-Unresolved architectural requirement. Neither enabling PVAccess/QSRV nor setting `PINI` or `SCAN` alone provides read-triggered StreamDevice processing. No workaround was adopted as the final interface.
+**Subsequent outcome (Milestone 4):** The IOC now uses `SCAN = "I/O Intr"` with a Python-sent `STATUS:<state>` notification and an input-only `monitorStatus` protocol. `caget` reads the latest stored status without `.PROC`; it does not force a fresh query. This is event-driven cached readback, not fresh-on-read processing. See Section 25.
 
 **Configuration check**
 
@@ -617,7 +617,7 @@ StreamDevice uses `Terminator = LF` in the existing protocol. Each Python respon
 
 **Verification**
 
-The revised server successfully processed sequential commands over a persistent Netcat TCP connection. This does not yet establish that the expanded EPICS StreamDevice protocol works; its command definitions remain to be updated.
+The revised server successfully processed sequential commands over a persistent Netcat TCP connection. The expanded EPICS command protocols were subsequently implemented and tested during Milestone 4. See Sections 23–30.
 
 **Remaining limitation:** `readline()` may wait indefinitely if a client sends no newline and keeps the connection open. Socket timeouts and exceptional-path connection cleanup remain future robustness work.
 
@@ -633,7 +633,7 @@ The server uses `update_camera_status()` to manage transitions among `CLOSED`, `
 
 Exposure is converted using `int()` and must be positive. Gain is converted using `float()` and checked to be finite and positive. Invalid strings such as `EXPOSURE abc` raise `ValueError`; invalid numerical settings are rejected before replacing stored requested values. The command handler catches ordinary exceptions and returns newline-terminated `ERROR:` responses instead of allowing them to terminate the TCP command loop.
 
-Automatic exposure is represented as `1` for enabled and `0` for disabled. Named EPICS state selection is planned through a suitable output record; this is not yet implemented in the IOC.
+Automatic exposure is represented as `1` for enabled and `0` for disabled. Named EPICS state selection was subsequently implemented with `mbbo` records for camera commands and automatic exposure.
 
 **Remaining limitations:** Numeric validity is not the same as validation against the IMX219's supported control ranges. Command failure handling and hardware recovery require additional testing.
 
@@ -652,7 +652,7 @@ The acquisition function releases its completed request in `finally`. If the acq
 
 **Important distinction:** The latest-path commands return file paths on the Raspberry Pi, not image bytes or JSON contents. Requested exposure/gain readbacks are also different from the actual values recorded in image metadata.
 
-**Remaining limitations:** The tests demonstrated successful acquisitions, not exhaustive camera-error recovery. Unexpected disconnections, partial file writes, camera-busy failures, and automatic EPICS I/O Intr notifications remain open areas.
+**Remaining limitations:** The tests demonstrated successful acquisitions, not exhaustive camera-error recovery. Unexpected disconnections, partial file writes, camera-busy failures, and I/O Intr reliability under mixed traffic remain open areas. Status and path notifications have now been demonstrated through EPICS.
 
 ## 22. Future Troubleshooting Topics
 
@@ -664,8 +664,214 @@ As development continues, this guide will expand to cover:
 - Image-saving failures, partial files and metadata consistency (successful paired JPEG/JSON saving is tested).
 - Unexpected TCP disconnects and recovery (newline framing is now implemented).
 - EPICS alarm states and hardware-health reporting.
-- On-demand fresh PV read behavior without continuous polling.
+- Reliable synchronization and message routing when unsolicited events share a request-response TCP connection.
+- Full PVAccess testing of the expanded control interface and future Phoebus image display.
+
+## 23. EPICS `mbbo` Camera Command Mapping
+
+**Design and verification**
+
+A single `CAM:CameraCommand` `mbbo` record replaces separate Start/Stop/Acquire/Close output PVs. Its states `Start`, `Stop`, `Acquire`, and `Close` map to indices 0–3. StreamDevice converts the selected index to the uppercase wire command:
+
+```text
+cameraCommand {
+    ReplyTimeout = 10000;
+    out "%{START|STOP|ACQUIRE|CLOSE}";
+    #in "OK";
+}
+```
+
+`caput CAM:CameraCommand Start` and `Stop` operated the physical camera; `Acquire` saved JPEG/JSON pairs. Repeated writes of `Acquire` triggered additional captures even when the selected `mbbo` value was unchanged.
+
+**Important limitation:** This is an *output-only* protocol; the commented `in "OK"` is inactive. Python still returns `OK\n` for these commands, which may remain as unsolicited traffic. A successful `caput` therefore does not by itself confirm successful acquisition. This protocol inconsistency is **not resolved** and should be revisited before treating the command channel as robust.
+
+## 24. IOC-Shell Commands Versus EPICS Client Commands
+
+**Symptom**
+
+```text
+epics> caget CAM:CameraCommand
+Command 'caget' not registered.
+```
+
+**Cause and solution**
+
+`epics>` is the IOC shell, not a Linux shell. Run `caget`, `caput`, `camonitor`, `pvget` and `pvput` from a separate terminal. In the IOC shell, use IOC commands such as `dbl` and `dbpr` for diagnostics. The error did not indicate a missing PV.
+
+## 25. `SCAN = "I/O Intr"` Requires Actual Incoming Notifications
+
+**Original limitation**
+
+A passive `GetStatus` record using `out "STATUS?"; in "%s";` returned its last stored value until explicitly processed. `SCAN = "1 second"` would poll unnecessarily. Changing the `SCAN` field alone cannot observe a Python variable.
+
+**Implemented approach**
+
+The Python `update_camera_status()` function now sends a newline-terminated notification whenever its state changes:
+
+```python
+message = f"STATUS:{new_status}\n"
+connection.sendall(message.encode("utf-8"))
+```
+
+StreamDevice listens with:
+
+```text
+monitorStatus {
+    in "STATUS:%s";
+}
+```
+
+The permanent `CAM:GetStatus` is a `stringin` record using `monitorStatus`, `SCAN = "I/O Intr"`, and an initial `VAL = "CLOSED"`. `camonitor` observed `STREAMING`, `ACQUIRING` and `IDLE`; ordinary `caget` returned the latest stored state without `.PROC`. This was tested over the **same** TCP connection as the command protocols, not a separate event port.
+
+**Scope and limitation**
+
+`VAL = "CLOSED"` reflects the expected startup lifecycle but is not a live handshake. The code closes the camera on a detected IOC disconnect, but startup races, missed notifications, abrupt disconnects and resynchronization are not comprehensively addressed. I/O Intr updates the IOC's cached value; it does not cause `caget` to query Python on demand.
+
+## 26. Unsolicited Status Messages Mismatched the `OK` Response
+
+**Observed IOC error**
+
+```text
+CAM_PORT CAM:CameraCommand: Input "STATUS:STREAMING"
+CAM_PORT CAM:CameraCommand: mismatch after 0 bytes ""
+CAM_PORT CAM:CameraCommand: got "STATUS:STR..." where "OK" was expected
+```
+
+**Why it happened**
+
+While processing `START` or `ACQUIRE`, Python's centralized status updater transmitted `STATUS:...` before the command handler returned `OK`. The command protocol expected `in "OK"`, so it encountered a status notification instead. The I/O Intr status record could still show updates, but this did **not** mean the command protocol had completed cleanly.
+
+**Experiment and current state**
+
+Removing `in "OK"` made the command protocol output-only. Camera operations continued to work, but Python still sends `OK\n`. We have **not demonstrated** that all unsolicited `OK` and status messages are correctly dispatched under every ordering. Simply changing or removing Python return statements would not, by itself, prove correct shared-port routing.
+
+**Next investigation:** Choose a consistent acknowledgement/notification protocol, verify asyn/StreamDevice dispatch behavior under load, and test errors and reconnects. A separate event connection is an alternative, not a requirement already adopted.
+
+## 27. Rapid Status Transitions Sometimes Missing from `camonitor`
+
+**Observed behavior**
+
+When acquisition began from `CLOSED`, Python emitted `IDLE → STREAMING → ACQUIRING → IDLE`. Different monitor runs displayed only subsets of the rapid initial transitions. When the camera was already streaming, both `ACQUIRING` and the final `STREAMING` were consistently observed in the reported tests.
+
+**Interpretation**
+
+Closely spaced notifications, EPICS record processing, shared-port message dispatch and client monitor scheduling are plausible factors. The experiments did **not** isolate the precise cause. TCP preserves byte order, but that does not guarantee every intermediate application state appears as a separate monitor event.
+
+**Outcome**
+
+The final status was correct in the performed tests. No artificial delays were added. This is a **known timing/visibility limitation**, not proof of reliable delivery of every intermediate transition.
+
+## 28. Parameter Readbacks Through `FLNK`
+
+**Design choice**
+
+The requested exposure, gain and auto-exposure settings change through their EPICS setter records. Rather than sending unsolicited notifications for each setter, the IOC uses forward links:
+
+```text
+SetExposure     → GetExposure
+SetGain         → GetGain
+SetAutoExposure → GetAutoExposure
+```
+
+For example, `SetExposure` includes:
+
+```text
+field(FLNK, "$(P)$(R)GetExposure")
+```
+
+The passive `GetExposure` record then sends `EXPOSURE?` to retrieve the stored Python setting. `camonitor` and `caget` confirmed updated values after `caput` without manual `.PROC` commands; the same was tested for gain and auto exposure.
+
+**Why not I/O Intr?** These are requested values updated by the IOC's own setters, whereas camera status can change during a single operation. `FLNK` does not detect independent external changes. Actual sensor exposure/gain remain distinct from requested settings and are available in capture metadata.
+
+## 29. Latest Image and Metadata Paths as I/O Intr Waveforms
+
+**Implementation**
+
+After successful acquisition, Python stores the two file paths and sends:
+
+```text
+IMAGE_PATH:<path>\n
+METADATA_PATH:<path>\n
+```
+
+Input-only protocols `monitorLatestImagePath` and `monitorLatestMetadataPath` update `waveform` records configured with `FTVL = "CHAR"`, `NELM = "512"`, and `SCAN = "I/O Intr"`.
+
+**Observed output**
+
+By default, `camonitor` displayed numeric character codes ending in `0` (a null terminator). This is expected for character-array waveforms. The paths displayed correctly as strings with:
+
+```bash
+caget -S CAM:GetLatestImagePath
+caget -S CAM:GetLatestMetadataPath
+camonitor -S CAM:GetStatus CAM:GetLatestImagePath CAM:GetLatestMetadataPath
+```
+
+Simultaneous monitoring worked. The waveform avoids the conventional short-string capacity limit; it contains a **file path**, not JPEG image bytes. This does not yet provide image display in Phoebus.
+
+**Open issue:** Multiple notifications share the command connection; repeated acquisition and error-path reliability should be stress-tested.
+
+## 30. Status Description: Whitespace Parsing, Wrong Message and Timeout
+
+**First symptom — surplus input / CALC INVALID**
+
+```text
+CAM:GetStatusDescription: 82 bytes surplus input " is running (camera...."
+CAM:GetStatusDescription: after 6 bytes: "Camera"
+```
+
+The original `in "%s"` read only the first whitespace-delimited word. Switching to a scanset consumed descriptions containing spaces:
+
+```text
+in "%[^\n]";
+```
+
+`caget CAM:GetStatusDescription.STAT` subsequently returned `NO_ALARM` in a successful test.
+
+**Second symptom — incorrect content**
+
+A monitor later displayed `STATUS:STREAMING` as the status description. A broad scanset can accept an unrelated unsolicited line on the shared TCP connection. To distinguish the intended response, Python was changed to return `DESCRIPTION:<text>\n`, and the protocol became:
+
+```text
+getStatusDescription {
+    out "STATUS_DESC?";
+    in "DESCRIPTION:%[^\n]";
+}
+```
+
+**Third symptom — timeout**
+
+```text
+CAM_PORT CAM:GetStatusDescription: No reply within 1000 ms to "STATUS_DESC?<0a>"
+```
+
+A forward link from the I/O Intr status record triggered `STATUS_DESC?` during acquisition. The Python server processes commands sequentially and can be busy capturing and saving for more than one second. Shared-port notifications can also complicate matching. A later `IDLE` description succeeded, so this was intermittent rather than a permanently broken protocol.
+
+**Current decision:** Remove the status-to-description `FLNK`. Keep `CAM:GetStatusDescription` passive and query it explicitly when needed. Increasing `ReplyTimeout` might reduce some timeouts but would not solve shared-port message routing. Automatic description updates remain postponed.
+
+## 31. Camera Cleanup and Shared-Connection Failure Risk
+
+The current `update_camera_status()` directly calls `connection.sendall(...)`. It may also be called from `close_camera()` during detected disconnect or shutdown. A connection variable may exist but refer to an already closed socket; sending can raise `OSError` and interrupt cleanup. The current Python server does not fully guard this case.
+
+Likewise, a command protocol that is output-only cannot use its missing acknowledgement to confirm failure. Python's `ERROR: ...` responses may also be unsolicited relative to such a protocol. These are **remaining robustness issues**, not tested fixes.
+
+## 32. Final Verification and Outstanding Work
+
+**Verified in Milestone 4**
+
+- `mbbo` camera commands operated Start/Stop/Acquire and repeated acquisition through Channel Access.
+- I/O Intr camera-status updates worked without periodic polling or manual `.PROC`.
+- Image and metadata path PVs updated automatically; `caget -S` displayed readable paths.
+- `FLNK` refreshed requested exposure, gain and automatic-exposure readbacks.
+- Multiple PVs could be monitored simultaneously.
+
+**Not yet established**
+
+- Reliable parsing and acknowledgement handling under all mixed notification/command sequences.
+- Automatic status-description updates during acquisition.
+- Full expanded-interface testing through PVAccess and Phoebus.
+- Image-byte transfer through EPICS (the current PVs expose paths only).
+- Complete disconnect/reconnect recovery and error-path behavior.
 
 ---
 
-**Documentation status:** Covers the original EPICS/StreamDevice and CA/PVA troubleshooting, plus Python TCP camera-control and acquisition tests. The expanded commands are verified directly over TCP but have not yet been integrated into the EPICS `.proto` and `.db` files.
+**Documentation status (18 October 2026):** Milestone 4 EPICS-controlled acquisition and readbacks have been demonstrated. This guide preserves earlier investigations and records unresolved communication limitations separately from verified results. Examples use documentation-only network addresses rather than a particular device's LAN IP.
