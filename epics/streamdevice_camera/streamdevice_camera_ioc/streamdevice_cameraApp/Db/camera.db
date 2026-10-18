@@ -1,12 +1,110 @@
-
 # PV to get the camera status
 
 record(stringin, "$(P)$(R)GetStatus") {
-    field(DESC, "Camera acquisition status")
+    field(DESC, "Camera operating status")
     field(DTYP, "stream")
-    field(INP, "@stream_camera.proto getStatus $(PORT)")
-    field(SCAN, "Passive")
+    field(INP, "@stream_camera.proto monitorStatus $(PORT)")
+    field(SCAN, "I/O Intr")
+    field(VAL, "CLOSED")
 }
 
 
+# Select camera operations through predefined commands
+record(mbbo, "$(P)$(R)CameraCommand") {
+    field(DESC, "Camera operation command")
+    field(DTYP, "stream")
+    field(OUT, "@stream_camera.proto cameraCommand $(PORT)")
+    field(ZRST, "Start")
+    field(ONST, "Stop")
+    field(TWST, "Acquire")
+    field(THST, "Close")
+    field(SCAN, "Passive")
+}
+# Read the description of the current camera status
+record(waveform, "$(P)$(R)GetStatusDescription") {
+    field(DESC, "Camera status description")
+    field(DTYP, "stream")
+    field(INP, "@stream_camera.proto getStatusDescription $(PORT)")
+    field(FTVL, "CHAR")
+    field(NELM, "256")
+    field(SCAN, "Passive")
+    
+}
+
+# Set requested exposure time in microseconds
+record(longout, "$(P)$(R)SetExposure") {
+    field(DESC, "Set exposure time in microseconds")
+    field(DTYP, "stream")
+    field(OUT, "@stream_camera.proto setExposure $(PORT)")
+    field(SCAN, "Passive")
+    field(FLNK, "$(P)$(R)GetExposure")
+}
+
+# Read requested exposure time in microseconds
+record(longin, "$(P)$(R)GetExposure") {
+    field(DESC, "Get requested exposure time")
+    field(DTYP, "stream")
+    field(INP, "@stream_camera.proto getExposure $(PORT)")
+    field(SCAN, "Passive")
+}
+
+# Set requested analogue gain
+record(ao, "$(P)$(R)SetGain") {
+    field(DESC, "Set analogue gain")
+    field(DTYP, "stream")
+    field(OUT, "@stream_camera.proto setGain $(PORT)")
+    field(PREC, "3")
+    field(SCAN, "Passive")
+    field(FLNK, "$(P)$(R)GetGain")
+}
+
+# Read requested analogue gain
+record(ai, "$(P)$(R)GetGain") {
+    field(DESC, "Get requested analogue gain")
+    field(DTYP, "stream")
+    field(INP, "@stream_camera.proto getGain $(PORT)")
+    field(PREC, "3")
+    field(SCAN, "Passive")
+}
+
+# Enable or disable automatic exposure
+record(mbbo, "$(P)$(R)SetAutoExposure") {
+    field(DESC, "Automatic exposure control")
+    field(DTYP, "stream")
+    field(OUT, "@stream_camera.proto setAutoExposure $(PORT)")
+    field(ZRST, "Disable")
+    field(ONST, "Enable")
+    field(SCAN, "Passive")
+    field(FLNK, "$(P)$(R)GetAutoExposure")
+}
+
+# Read automatic exposure setting
+record(mbbi, "$(P)$(R)GetAutoExposure") {
+    field(DESC, "Read automatic exposure setting")
+    field(DTYP, "stream")
+    field(INP, "@stream_camera.proto getAutoExposure $(PORT)")
+    field(ZRST, "Disable")
+    field(ONST, "Enable")
+    field(SCAN, "Passive")
+}
+
+# Read the latest acquired image path
+record(waveform, "$(P)$(R)GetLatestImagePath") {
+    field(DESC, "Latest acquired image path")
+    field(DTYP, "stream")
+    field(INP, "@stream_camera.proto monitorLatestImagePath $(PORT)")
+    field(FTVL, "CHAR")
+    field(NELM, "512")
+    field(SCAN, "I/O Intr")
+}
+
+# Read the latest acquisition metadata path
+record(waveform, "$(P)$(R)GetLatestMetadataPath") {
+    field(DESC, "Latest acquisition metadata path")
+    field(DTYP, "stream")
+    field(INP, "@stream_camera.proto monitorLatestMetadataPath $(PORT)")
+    field(FTVL, "CHAR")
+    field(NELM, "512")
+    field(SCAN, "I/O Intr")
+}
 

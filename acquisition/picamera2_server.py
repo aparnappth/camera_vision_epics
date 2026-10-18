@@ -70,6 +70,10 @@ def update_camera_status(new_status):
         camera_status = new_status
         print(f"Camera status changed to: {new_status}")
 
+        # Send status notification through the existing TCP connection
+        message = f"STATUS:{new_status}\n"
+        connection.sendall(message.encode("utf-8"))
+
 
 
 # Initialize the IMX219 camera only if it is not already open
@@ -292,6 +296,14 @@ def acquire_image():
     # Store the paths of the latest successful acquisition
     last_image_path = str(image_path)
     last_metadata_path = str(metadata_path)
+    # Notify EPICS after successful acquisition
+    connection.sendall(
+    f"IMAGE_PATH:{last_image_path}\n".encode("utf-8")
+    )
+
+    connection.sendall(
+    f"METADATA_PATH:{last_metadata_path}\n".encode("utf-8")
+    )
 
     return str(image_path), str(metadata_path)
 
@@ -305,7 +317,7 @@ def process_command(command):
             return camera_status + "\n"
 
         elif command == "STATUS_DESC?":
-            return status_messages[camera_status] + "\n"
+            return "DESCRIPTION:" + status_messages[camera_status] + "\n"
 
         elif command == "START":
             start_camera()

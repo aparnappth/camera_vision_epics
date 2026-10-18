@@ -1,6 +1,86 @@
+
+# StreamDevice protocol for the Python camera TCP server
+
 Terminator = LF;
 
+# Read current camera operating status
 getStatus {
     out "STATUS?";
     in "%s";
+}
+
+# Read the description of the camera status
+getStatusDescription {
+    out "STATUS_DESC?";
+    in "DESCRIPTION:%[^\n]";
+}
+
+# Camera operations selected through the EPICS mbbo record
+cameraCommand {
+    ReplyTimeout = 10000;
+    out "%{START|STOP|ACQUIRE|CLOSE}";
+    #in "OK";
+}
+
+# Set requested exposure time in microseconds
+setExposure {
+    out "EXPOSURE %d";
+    in "OK";
+}
+
+# Read requested exposure time
+getExposure {
+    out "EXPOSURE?";
+    in "%d";
+}
+
+# Set requested analogue gain
+setGain {
+    out "GAIN %f";
+    in "OK";
+}
+
+# Read requested analogue gain
+getGain {
+    out "GAIN?";
+    in "%f";
+}
+
+# Enable or disable automatic exposure
+setAutoExposure {
+    out "AUTO_EXPOSURE %d";
+    in "OK";
+}
+
+# Read automatic exposure setting
+getAutoExposure {
+    out "AUTO_EXPOSURE?";
+    in "%d";
+}
+
+# Read path of the latest acquired image
+getLatestImagePath {
+    out "LATEST_IMAGE_PATH?";
+    in "%s";
+}
+
+# Read path of the latest acquisition metadata
+getLatestMetadataPath {
+    out "LATEST_METADATA_PATH?";
+    in "%s";
+}
+
+# Receive unsolicited camera status updates
+monitorStatus {
+    in "STATUS:%s";
+}
+
+# Monitor latest acquired image path
+monitorLatestImagePath {
+    in "IMAGE_PATH:%s";
+}
+
+# Monitor latest acquisition metadata path
+monitorLatestMetadataPath {
+    in "METADATA_PATH:%s";
 }
