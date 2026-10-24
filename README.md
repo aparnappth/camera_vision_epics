@@ -415,8 +415,7 @@ Generated acquisition files are intended to remain outside Git version control. 
 - [x] Implement I/O Intr image and metadata path readbacks
 - [x] Verify simultaneous monitoring of multiple PVs
 - [x] Complete expanded PVAccess interface testing
-- [ ] Resolve remaining shared-port communication robustness issues
-- [ ] Implement reliable automatic status-description updates
+
 
 ### Milestone 5 — Initial Automation and Characterization
 
@@ -477,23 +476,34 @@ camera_vision_epics/
 
 ## Current Limitations and Open Questions
 
-- The Python camera server processes one active TCP client connection at a time.
-- Acquisition is synchronous and blocks the Python command loop until completion.
-- Command-response communication and unsolicited notifications share the same TCP connection. Some protocol mismatches and timing-dependent behavior were observed during development.
-- The output-only camera-command protocol does not wait for acquisition-completion acknowledgement. The Python server still generates `OK` responses, which require further protocol review.
-- Rapid intermediate status transitions are not always individually visible in EPICS monitors, although final states were correct in the performed tests.
-- The status-description readback is passive. Automatic updates were postponed after parsing and timeout issues.
-- The initial `CLOSED` value of the status PV assumes the normal Python server startup and disconnect lifecycle; reconnection synchronization is not fully implemented.
-- Camera status is maintained by the Python application rather than independently reporting hardware health.
-- Requested exposure and gain readbacks do not necessarily represent the actual sensor values; acquisition metadata provides the applied values.
+### Communication and Monitoring
+
+- The Python camera server supports one active TCP client connection at a time.
+- Image acquisition is synchronous, so the Python server cannot process new commands until the acquisition finishes.
+- Camera commands, readbacks, and automatic notifications share the same TCP connection. Some protocol mismatches were observed during development. The current implementation works in our tests, but communication under all conditions has not been verified.
+- The output-only camera-command protocol does not wait for an acknowledgement. The Python server still sends `OK` responses, which may interfere with other messages and require further investigation.
+- Rapid intermediate camera states, particularly `ACQUIRING`, are sometimes missed by `camonitor` and `pvmonitor`. The final status was correct in our tests, but the cause of the missed updates remains unknown.
+- Automatic status-description updates were postponed after parsing and timeout issues. The readback remains passive because automatic updates are not essential for the current implementation.
+- The status PV initially assumes `CLOSED`, based on the normal camera-server startup behavior. Synchronization after reconnection has not been fully tested.
+- Camera status is maintained by the Python application rather than measured independently from the hardware.
+- Basic error handling is implemented, but more extensive connection recovery, failure reporting, and sensor-parameter validation remain untested.
+
+### Acquisition and Automation
+
+- Exposure and gain readbacks represent the requested settings. The actual values applied during acquisition are available in the saved metadata.
+- The automation detects acquisition completion when the latest image-path PV changes. Additional handling may be needed if a notification is missed or the server restarts.
+- Images and metadata are saved on the Raspberry Pi. The EPICS PVs provide their file paths, not the file contents.
+- The exposure-sweep CSV records absolute Raspberry Pi file paths. Remote analysis requires access to the files and appropriate path handling.
+
+### Image Analysis and Characterization
+
 - Images are saved as processed JPEG files rather than raw sensor data.
-- The latest image and metadata PVs return file paths, not the file contents.
+- The initial exposure-response measurements used processed JPEGs and scenes without fully controlled illumination. The results demonstrate the measurement workflow but do not establish the intrinsic linearity or noise performance of the IMX219.
 - Full image transfer and display through EPICS/Phoebus have not yet been implemented.
-- More extensive camera-error recovery, TCP connection cleanup, and sensor-parameter validation remain future improvements.
-- A change in the image-path PV is used to confirm new acquisitions in the current automation. A missed notification or server restart may require additional handling.
-- The CSV records absolute Raspberry Pi paths; remote analysis requires file access and path handling.
-- The first exposure-response measurements used processed JPEGs and uncontrolled scenes. They are not a measurement of intrinsic sensor linearity or noise.
-- The project virtual environment uses `--system-site-packages` to access the Raspberry Pi camera libraries; it is not fully isolated.
+
+### Python Environment
+
+- The project uses a virtual environment created with `--system-site-packages` to access the Raspberry Pi camera libraries. This provides some dependency separation but is not fully isolated from system-installed packages.
 
 ## Development Roadmap
 
@@ -519,7 +529,6 @@ camera_vision_epics/
 - [x] Implement I/O Intr status and acquisition-path updates
 - [x] Implement FLNK-based parameter readbacks
 - [x] Complete PVAccess testing for the expanded interface
-- [ ] Improve communication reliability and error reporting
 - [x] Develop and test an initial automated exposure-sweep workflow
 
 ### Phase 4 — Camera Characterization and Vision
