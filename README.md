@@ -238,13 +238,13 @@ Simultaneous monitoring of camera status, image path, and metadata path was succ
 
 ### 9. Testing the Expanded PVAccess Interface
 
-QSRV makes the IOC's ordinary database records available through PVAccess as well as Channel Access. We tested camera commands, exposure, gain, automatic exposure, status, and acquisition-file paths using `pvget`, `pvput`, and `pvmonitor`. These functions worked in the tests. However, `pvmonitor` sometimes missed the brief `ACQUIRING` state, as `camonitor` sometimes did. We have not identified which part of the communication or monitoring chain causes this.
+QSRV makes ordinary IOC database records available through PVAccess as well as Channel Access. Camera commands, exposure, gain, automatic exposure, status, and acquisition-file paths were verified using `pvget`, `pvput`, and `pvmonitor`. The brief `ACQUIRING` state was occasionally absent from both `pvmonitor` and `camonitor` output. The cause has not been identified.
 
 **Result:** The expanded PVAccess interface is working for the tested controls and readbacks. Rapid intermediate status monitoring remains a known limitation.
 
 ### 10. Automating Image Acquisition with PyEpics
 
-We added `automation/exposure_sweep.py` to acquire a series of images at different exposure times. The script uses PyEpics to communicate with the IOC, rather than controlling Picamera2 directly. This means the same automation logic can run on the Raspberry Pi or on another computer that can reach the EPICS IOC.
+`automation/exposure_sweep.py` acquires a series of images at different exposure times. It uses PyEpics to communicate with the IOC rather than calling Picamera2 directly. This separates measurement automation from camera hardware control and allows the script to run on the Raspberry Pi or on another computer with access to the IOC.
 
 The script disables automatic exposure, sets a fixed requested gain, and then repeats the following steps for each exposure value:
 
@@ -255,24 +255,24 @@ The script disables automatic exposure, sets a fixed requested gain, and then re
 5. Wait for the metadata path with the matching filename.
 6. Save the requested exposure, readback, gain setting, and both paths as one row in a CSV log.
 
-We use the image-path change rather than a short `ACQUIRING` status transition because the path is updated after a successful image save and remains available to read. This method has worked in our tests, but it is not a complete command acknowledgement or failure-reporting system.
+A change in the latest image path is used as the acquisition-completion indicator because the path is published after a successful image save and remains available for later reads. Unlike the short `ACQUIRING` state, it does not depend on observing a brief transition. This approach worked in the performed tests, but it is not a complete command-acknowledgement or failure-reporting system.
 
 **Result:** An automated five-point exposure sweep was completed successfully, with matching image and metadata paths recorded in a CSV file.
 
 ### 11. Initial Exposure Verification and JPEG Analysis
 
-Two separate scripts were added under `characterization/`:
+Two scripts under `characterization/` handle exposure verification and image analysis:
 
 - `check_exposure.py` reads the sweep CSV and each JSON metadata file, then compares the requested exposure with the exposure reported for the captured frame.
 - `analyze_exposure_response.py` reads the JPEG images, converts them to 8-bit grayscale using Pillow, and uses NumPy to calculate the mean, minimum, maximum, and standard deviation of pixel intensity. Matplotlib saves a plot of mean intensity against the camera-reported exposure time.
 
-Separating acquisition and analysis lets us examine the same dataset again without operating the camera. The scripts currently select the latest timestamped sweep CSV when run from the repository root.
+Keeping acquisition and analysis in separate scripts allows saved datasets to be analyzed again without operating the camera. The analysis scripts select the latest timestamped sweep CSV when run from the repository root.
 
-For the first sweep, the requested exposures were 5, 10, 20, 40, and 80 ms. The metadata reported 4,990, 9,999, 19,999, 39,999, and 79,999 µs respectively. The largest difference was 10 µs (0.2%) at the shortest setting.
+An initial five-point sweep requested exposure times of 5, 10, 20, 40, and 80 ms. The corresponding frame metadata reported 4,990, 9,999, 19,999, 39,999, and 79,999 µs. The largest difference was 10 µs (0.2%) at the shortest setting.
 
-We then repeated the sweep under brighter illumination and after adjusting the lens focus. In the final analyzed set, the grayscale means increased from 3.69 at 4.99 ms to 42.11 at 80 ms. The image-wide standard deviation also increased, but this includes variation in the scene and must not be treated as a direct noise measurement.
+Additional sweeps were recorded under brighter illumination and after lens-focus adjustment. In the latest analyzed dataset, the mean grayscale intensity increased from 3.69 at 4.99 ms to 42.11 at 80 ms. The image-wide standard deviation also increased, but it includes differences in scene brightness and is not a direct measure of sensor noise.
 
-These are **processed JPEG measurements**, affected by the camera image-processing pipeline and the scene. They show that the measurement workflow works and that JPEG brightness increases with exposure; they do not establish intrinsic sensor linearity or noise performance. We have paused further ROI, linearity, and noise studies for now.
+These are **processed JPEG measurements** influenced by the camera image-processing pipeline and the scene. They demonstrate the acquisition and analysis workflow and an increase in JPEG brightness with exposure time. They do not establish intrinsic sensor linearity or noise performance. Region-of-interest (ROI), raw-sensor linearity, and noise studies are outside the scope of this initial analysis.
 
 **Result:** Automated acquisition, exposure verification, basic image statistics, and exposure-response plotting have been tested.
 
@@ -322,7 +322,7 @@ The physical camera and its Python server run on the Raspberry Pi. EPICS provide
 | Exposure verification and JPEG analysis | Any computer that can access the CSV and its image/metadata files |
 | Phoebus image display | Not implemented yet |
 
-**Remote control is not remote file transfer.** When a remote computer sends `Acquire`, the Raspberry Pi still saves the image and metadata locally. The EPICS path PVs return their locations, not their contents. Our CSV currently records absolute paths from the Raspberry Pi. To analyze the dataset on Windows or another computer, we must first transfer or share the files and adjust how the analysis script resolves their paths. That portability improvement is future work.
+**Remote control does not transfer image files.** When a remote computer sends `Acquire`, the Raspberry Pi saves the image and metadata locally. The EPICS path PVs return file locations, not file contents. The CSV currently records absolute Raspberry Pi paths. Analysis on Windows or another computer requires access to the saved files and appropriate path handling. Portable dataset paths are not yet implemented.
 
 The Python camera server uses the local loopback address `127.0.0.1:5000` to communicate with the IOC. Remote clients connect to the EPICS IOC, not directly to this camera-server port. Network discovery and firewall settings must allow the chosen EPICS protocol.
 
@@ -473,6 +473,7 @@ camera_vision_epics/
 
 - [Understanding EPICS Device Integration](docs/notes/epics_device_integration.md) — EPICS device support, hardware drivers, StreamDevice, asyn, Python APIs, and areaDetector.
 - [Standalone Picamera2 Acquisition Test](docs/notes/test_picamera2_acquisition.md) — Still-image acquisition, camera configuration, metadata, exposure/gain settings, and resource management.
+- [Automated Acquisition and Initial Characterization](docs/notes/automated_acquisition_and_characterization.md) — PyEpics exposure sweeps, CSV logging, image analysis, measured results, and local/remote operation.
 
 ## Current Limitations and Open Questions
 
@@ -480,9 +481,9 @@ camera_vision_epics/
 
 - The Python camera server supports one active TCP client connection at a time.
 - Image acquisition is synchronous, so the Python server cannot process new commands until the acquisition finishes.
-- Camera commands, readbacks, and automatic notifications share the same TCP connection. Some protocol mismatches were observed during development. The current implementation works in our tests, but communication under all conditions has not been verified.
+- Camera commands, readbacks, and automatic notifications share the same TCP connection. Some protocol mismatches were observed during development. The implementation works in the performed tests, but communication under all conditions has not been verified.
 - The output-only camera-command protocol does not wait for an acknowledgement. The Python server still sends `OK` responses, which may interfere with other messages and require further investigation.
-- Rapid intermediate camera states, particularly `ACQUIRING`, are sometimes missed by `camonitor` and `pvmonitor`. The final status was correct in our tests, but the cause of the missed updates remains unknown.
+- Rapid intermediate camera states, particularly `ACQUIRING`, are sometimes missed by `camonitor` and `pvmonitor`. The final status was correct in the performed tests, but the cause of the missed updates remains unknown.
 - Automatic status-description updates were postponed after parsing and timeout issues. The readback remains passive because automatic updates are not essential for the current implementation.
 - The status PV initially assumes `CLOSED`, based on the normal camera-server startup behavior. Synchronization after reconnection has not been fully tested.
 - Camera status is maintained by the Python application rather than measured independently from the hardware.
