@@ -568,6 +568,10 @@ Implementation guides document reproducible configurations and design decisions,
 
 Completed functionality is distinguished from planned work and known limitations.
 
+## Acknowledgements
+
+OpenAI's ChatGPT was used as a learning and development assistant throughout this project, providing support with technical explanations, code development, troubleshooting, and documentation. The implementation was tested and validated through hands-on work with the Raspberry Pi, EPICS, and camera hardware.
+
 ## References
 
 - [EPICS Documentation](https://docs.epics-controls.org/)
