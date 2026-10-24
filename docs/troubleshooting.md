@@ -400,8 +400,8 @@ The PVA server alone did not expose ordinary IOC database records. The missing c
 On the Raspberry Pi, the following files were present:
 
 ```text
-~/projects/epics/base/dbd/qsrv.dbd
-~/projects/epics/base/lib/linux-arm/libqsrv.so
+<EPICS_BASE>/dbd/qsrv.dbd
+<EPICS_BASE>/lib/<EPICS_HOST_ARCH>/libqsrv.so
 ```
 
 **Solution**
@@ -665,7 +665,7 @@ As development continues, this guide will expand to cover:
 - Unexpected TCP disconnects and recovery (newline framing is now implemented).
 - EPICS alarm states and hardware-health reporting.
 - Reliable synchronization and message routing when unsolicited events share a request-response TCP connection.
-- Full PVAccess testing of the expanded control interface and future Phoebus image display.
+- Phoebus image display and image-array transport through EPICS (expanded PVAccess testing is complete).
 
 ## 23. EPICS `mbbo` Camera Command Mapping
 
@@ -868,10 +868,157 @@ Likewise, a command protocol that is output-only cannot use its missing acknowle
 
 - Reliable parsing and acknowledgement handling under all mixed notification/command sequences.
 - Automatic status-description updates during acquisition.
-- Full expanded-interface testing through PVAccess and Phoebus.
+- Phoebus interface testing (the expanded PVAccess command and readback interface has been tested).
 - Image-byte transfer through EPICS (the current PVs expose paths only).
 - Complete disconnect/reconnect recovery and error-path behavior.
 
+
+## 33. PyEpics Import Resolved to the Wrong `epics` Module
+
+**Symptom**
+
+```text
+AttributeError: module 'epics' has no attribute 'caget'
+```
+
+An earlier version check also failed because the imported module did not provide `__version__`.
+
+**Cause and verification**
+
+The repository contains an `epics/` directory, which Python can recognize as a namespace package when PyEpics is not installed. Importing `epics` therefore does not, by itself, confirm that the PyEpics library is available.
+
+```bash
+python -c "import epics; print(epics.__file__)"
+python -m pip show pyepics
+```
+
+**Resolution**
+
+A project-specific environment was created with access to system-installed Picamera2 dependencies:
+
+```bash
+python3 -m venv --system-site-packages .venv
+source .venv/bin/activate
+python -m pip install pyepics
+python -c "import epics; print(epics.caget, epics.caput)"
+```
+
+The import then resolved to `.venv/lib/.../site-packages/epics/__init__.py`. The `.venv/` directory is excluded from Git. Because `--system-site-packages` exposes system packages, this environment is not fully isolated.
+
+## 34. PyEpics Could Not Connect to a PV
+
+**Symptom**
+
+```text
+cannot connect to CAM:GetStatus
+None
+```
+
+**Cause in the observed test**
+
+The IOC was not running. The PyEpics installation itself was functioning.
+
+**Resolution**
+
+Start the Python camera service and the IOC, then confirm the PV using a command-line client:
+
+```bash
+caget CAM:GetStatus
+```
+
+After the IOC started, `epics.caget("CAM:GetStatus")` worked. A successful Python import does not imply that an IOC is available on the network.
+
+## 35. Exposure Readback Initially Returned an Old Value
+
+**Symptom**
+
+After `caput` through PyEpics requested an exposure of `20000` microseconds, an immediate `caget` of `CAM:GetExposure` returned `0`. A later terminal read returned `20000`.
+
+**Investigation**
+
+The Python server log showed both `EXPOSURE 20000` and `EXPOSURE?`, confirming that the setter and FLNK-triggered getter were issued. The likely explanation is that the readback record had not finished updating when the automation read it. The exact scheduling point was not instrumented.
+
+**Current approach**
+
+The automation waits for the requested value rather than assuming an immediate read is current:
+
+```python
+start = time.monotonic()
+while True:
+    value = epics.caget("CAM:GetExposure")
+    if value == requested_exposure:
+        break
+    if time.monotonic() - start > 5:
+        raise TimeoutError("Exposure readback did not update")
+    time.sleep(0.05)
+```
+
+This checks the requested value maintained by the Python server, **not** the sensor-applied exposure. The applied value is checked separately using the captured frame's JSON metadata.
+
+## 36. Acquisition Completion and File-Path Monitoring
+
+**Observed behavior**
+
+A successful write to the output-only `CAM:CameraCommand` record does not establish that a JPEG has been saved. The automation therefore records the previous `CAM:GetLatestImagePath`, sends `Acquire`, and waits for a nonempty, changed image path. It then checks that `CAM:GetLatestMetadataPath` names the corresponding JSON file.
+
+**Limitation**
+
+This worked in the tested exposure sweeps but is not a complete acknowledgement protocol. Missed path notifications, server restarts, and error cases require additional handling. A timeout prevents the script from waiting indefinitely. Image and metadata files remain on the Raspberry Pi even if the automation runs on another computer.
+
+For the implementation and analysis workflow, see [Automated Acquisition and Characterization](notes/automated_acquisition_and_characterization.md).
+
+## 37. Matplotlib Installation Warning in the Project Environment
+
+**Symptom**
+
+The analysis script initially failed with:
+
+```text
+ModuleNotFoundError: No module named 'matplotlib'
+```
+
+Installing Matplotlib inside the activated virtual environment succeeded, but pip reported a dependency warning involving `types-seaborn` and `pandas-stubs`.
+
+**Outcome**
+
+```bash
+python -m pip install matplotlib
+python -c "import numpy, matplotlib; from PIL import Image; print('Libraries available')"
+```
+
+The warning did not prevent the required plotting package from installing. No additional package was needed for the tested analysis.
+
+## 38. Raspberry Pi Booted but Wi-Fi Was Disconnected
+
+**Symptoms**
+
+The headless Raspberry Pi could not be reached by SSH or Raspberry Pi Connect. The previously used IP address was unreachable, but the monitor showed a normal Linux login prompt.
+
+**Diagnosis**
+
+After connecting a keyboard, `nmcli device status` showed `wlan0` as disconnected. The usual Wi-Fi network was visible in `nmcli device wifi list`, but `nmcli connection show` did not list its saved connection profile.
+
+**Resolution**
+
+Reconnect through NetworkManager without placing the password in the shell command:
+
+```bash
+sudo nmcli --ask device wifi connect "<WIFI_SSID>" ifname wlan0
+nmcli device status
+nmcli -f NAME,TYPE,AUTOCONNECT connection show
+hostname -I
+```
+
+Wi-Fi and SSH access were restored, and the saved Wi-Fi connection showed autoconnect enabled. This was a network configuration issue, not evidence that the EPICS application or SD card needed reinstalling. Avoid publishing real Wi-Fi credentials or private network details in documentation.
+
+## 39. Expanded PVAccess Tests and Remaining Monitor Limitation
+
+The expanded interface was tested using `pvget`, `pvput`, and `pvmonitor`. Camera commands, exposure, gain, automatic exposure, and acquisition-file paths worked in the reported tests.
+
+However, both `camonitor` and `pvmonitor` occasionally failed to display the brief `ACQUIRING` state. The final state remained correct. The tests did not isolate whether intermediate events were missed in StreamDevice/asyn, record processing, or client monitor delivery.
+
+**Current decision:** Keep this as a known limitation. Automated acquisition uses a changed image path and matching metadata path rather than requiring every intermediate status event. No artificial delay was added to force status visibility.
+
 ---
 
-**Documentation status (18 October 2026):** Milestone 4 EPICS-controlled acquisition and readbacks have been demonstrated. This guide preserves earlier investigations and records unresolved communication limitations separately from verified results. Examples use documentation-only network addresses rather than a particular device's LAN IP.
+**Documentation status (24 October 2026):** EPICS-controlled acquisition, expanded PVAccess testing, PyEpics exposure-sweep automation, and initial JPEG characterization have been demonstrated. The earlier investigations remain as historical troubleshooting records. Communication robustness and rapid status-event visibility are still open limitations.
