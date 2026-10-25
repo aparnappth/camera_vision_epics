@@ -33,6 +33,8 @@ The project focuses on four areas:
 - VLC for camera positioning and live preview
 - PyEpics for automated EPICS measurements
 - NumPy, Pillow, and Matplotlib for image analysis
+- p4p for publishing image arrays through PVAccess
+- Phoebus Display Builder for camera controls and acquired-image display
 
 ## System Architecture
 
@@ -79,7 +81,33 @@ Both command-response communication and unsolicited acquisition/status notificat
 
 Camera control and acquisition have been tested through Channel Access. The expanded camera interface has now been tested through both Channel Access and PVAccess. Brief intermediate status changes are not always visible in either monitor.
 
-### 2. areaDetector IOC — Planned
+### 2. Separate PVAccess Image Publisher — Current Implementation
+
+```text
+                  Phoebus on Windows
+                    /          \
+          Camera controls     RGB image display
+                 |                  |
+          Channel Access       PVAccess
+                 |                  |
+         EPICS IOC + QSRV       CAM:Image
+                 |                  |
+          StreamDevice       Python p4p publisher
+                 |                  |
+          TCP port 5000    Latest saved JPEG file
+                 |                  |
+          Python camera server ----+
+                 |
+              Picamera2
+                 |
+                IMX219
+```
+
+`acquisition/pva_image_publisher.py` is a separate Python program. It reads the latest JPEG path from `CAM:GetLatestImagePath` through PyEpics, opens the saved image on the Raspberry Pi, resizes it to 100 × 100 pixels, and publishes interleaved 8-bit RGB values as `CAM:Image` through p4p. The publisher checks the path periodically and updates the PV when a new image is available. Phoebus displays this array using its Image widget (`TYPE_RGB1`, unsigned data enabled).
+
+The publisher is started separately from the camera server and IOC. This keeps image transfer independent of the existing StreamDevice TCP connection. The original full-resolution JPEG and matching metadata are preserved. This is acquired-image display, not live video streaming.
+
+### 3. areaDetector IOC — Planned
 
 ```text
 EPICS Clients
@@ -276,6 +304,16 @@ These are **processed JPEG measurements** influenced by the camera image-process
 
 **Result:** Automated acquisition, exposure verification, basic image statistics, and exposure-response plotting have been tested.
 
+### 12. Phoebus Camera Control and Image Display
+
+A Phoebus Display Builder screen provides camera operations, exposure and gain controls, automatic-exposure selection, status readbacks, and the latest JPEG and metadata paths using the existing IOC PVs.
+
+For image display, the separate Python PVAccess publisher makes `CAM:Image` available without adding an image waveform to `camera.db` or changing `stream_camera.proto`. The publisher uses the latest saved image path to detect new acquisitions and publishes a resized RGB array. The Phoebus Image widget has been tested with `pva://CAM:Image`, width and height set to 100, `TYPE_RGB1`, and unsigned data enabled.
+
+The camera database has also been updated to include `EGU = "us"` for exposure setpoint and readback records and `PINI = "YES"` for the exposure, gain, and automatic-exposure readbacks. Startup processing requests values from the Python server when communication is available; it does not automatically synchronize the corresponding setter PVs or guarantee recovery after reconnection.
+
+**Result:** Camera operation and automatic updates of acquired RGB images have been demonstrated in Phoebus. The publisher remains an independent process that must be running for image display to update.
+
 ## Current EPICS Camera Interface
 
 | PV | Record type | Purpose |
@@ -303,6 +341,8 @@ These are **processed JPEG measurements** influenced by the camera image-process
 | Latest image and metadata paths | I/O Intr |
 | Status description | Passive, explicitly processed when required |
 
+Exposure and gain readbacks, along with the automatic-exposure readback, also use `PINI = "YES"` to request their values during IOC initialization. Exposure PVs use the engineering unit `us`.
+
 The status-description readback is intentionally kept passive. Automatic updating through a forward link was investigated but postponed after timeout and message-handling issues were observed during acquisition.
 
 The detailed implementation and design decisions are documented in [StreamDevice Camera IOC](docs/streamdevice_ioc.md).
@@ -320,9 +360,11 @@ The physical camera and its Python server run on the Raspberry Pi. EPICS provide
 | Captured JPEG and JSON metadata | Saved on the Raspberry Pi |
 | Exposure-sweep CSV log | Saved on the computer running the automation script |
 | Exposure verification and JPEG analysis | Any computer that can access the CSV and its image/metadata files |
-| Phoebus image display | Not implemented yet |
+| Phoebus camera controls and acquired-image display | Phoebus on a remote computer, using IOC PVs and `CAM:Image` |
+| Python p4p image publisher | Raspberry Pi, started as a separate program |
+| Published RGB image array | Transferred through PVAccess; original JPEG remains on the Pi |
 
-**Remote control does not transfer image files.** When a remote computer sends `Acquire`, the Raspberry Pi saves the image and metadata locally. The EPICS path PVs return file locations, not file contents. The CSV currently records absolute Raspberry Pi paths. Analysis on Windows or another computer requires access to the saved files and appropriate path handling. Portable dataset paths are not yet implemented.
+**Remote control does not transfer image files.** When a remote computer sends `Acquire`, the Raspberry Pi saves the image and metadata locally. The EPICS path PVs return file locations, not file contents. The CSV currently records absolute Raspberry Pi paths. Analysis on Windows or another computer requires access to the saved files and appropriate path handling. Portable dataset paths are not yet implemented. The separate image publisher reads local JPEG files on the Pi and transfers only a resized RGB pixel array through PVAccess for Phoebus display.
 
 The Python camera server uses the local loopback address `127.0.0.1:5000` to communicate with the IOC. Remote clients connect to the EPICS IOC, not directly to this camera-server port. Network discovery and firewall settings must allow the chosen EPICS protocol.
 
@@ -426,7 +468,18 @@ Generated acquisition files are intended to remain outside Git version control. 
 - [x] Complete an exposure sweep and save a CSV measurement log
 - [x] Compare requested exposure with camera metadata
 - [x] Measure basic JPEG intensity statistics and plot exposure response
-- [ ] Perform controlled raw-sensor linearity, gain, and noise studies
+- [ ] Perform controlled raw-sensor linearity, gain, and noise studies (deferred)
+
+### Milestone 6 — Phoebus Control and Image Visualization
+
+- [x] Create a Phoebus interface for camera commands, exposure, gain, and automatic exposure
+- [x] Display camera status and latest JPEG/metadata paths
+- [x] Add exposure engineering units and startup processing for setting readbacks
+- [x] Publish a saved IMX219 image as an RGB array using Python and p4p
+- [x] Display the RGB array in Phoebus using PVAccess
+- [x] Update the image display automatically when the latest acquisition path changes
+- [x] Keep the image publisher separate from the camera-control server and IOC
+- [ ] Evaluate image resolution and transfer performance
 
 ## Repository Structure
 
@@ -443,6 +496,7 @@ camera_vision_epics/
 ├── acquisition/
 │   ├── camera_server_simulator.py
 │   ├── picamera2_server.py
+│   ├── pva_image_publisher.py
 │   ├── tests/
 │   │   └── test_camera_acquisition.py
 │   └── images/
@@ -481,7 +535,7 @@ camera_vision_epics/
 
 - The Python camera server supports one active TCP client connection at a time.
 - Image acquisition is synchronous, so the Python server cannot process new commands until the acquisition finishes.
-- Camera commands, readbacks, and automatic notifications share the same TCP connection. Some protocol mismatches were observed during development. The implementation works in the performed tests, but communication under all conditions has not been verified.
+- Camera commands, readbacks, and automatic notifications share the same TCP connection. Intermittent mismatches have occurred when StreamDevice expected `OK` but received a status notification such as `STATUS:IDLE`. Camera operations continued to work in the observed tests. `ExtraInput = Ignore;` is an untested option to investigate if the error reappears; it may not solve messages arriving before the expected response. The current protocol remains unchanged.
 - The output-only camera-command protocol does not wait for an acknowledgement. The Python server still sends `OK` responses, which may interfere with other messages and require further investigation.
 - Rapid intermediate camera states, particularly `ACQUIRING`, are sometimes missed by `camonitor` and `pvmonitor`. The final status was correct in the performed tests, but the cause of the missed updates remains unknown.
 - Automatic status-description updates were postponed after parsing and timeout issues. The readback remains passive because automatic updates are not essential for the current implementation.
@@ -500,7 +554,8 @@ camera_vision_epics/
 
 - Images are saved as processed JPEG files rather than raw sensor data.
 - The initial exposure-response measurements used processed JPEGs and scenes without fully controlled illumination. The results demonstrate the measurement workflow but do not establish the intrinsic linearity or noise performance of the IMX219.
-- Full image transfer and display through EPICS/Phoebus have not yet been implemented.
+- A resized RGB image is available in Phoebus through the separate p4p publisher. Full-resolution image transfer, live video, and standard NTNDArray-based transport have not been implemented.
+- The image publisher checks the latest-image-path PV periodically. It can miss intermediate acquisitions if multiple new images arrive between checks, and it must run on a computer that can access the saved JPEG files.
 
 ### Python Environment
 
@@ -530,28 +585,41 @@ camera_vision_epics/
 - [x] Implement I/O Intr status and acquisition-path updates
 - [x] Implement FLNK-based parameter readbacks
 - [x] Complete PVAccess testing for the expanded interface
-- [x] Develop and test an initial automated exposure-sweep workflow
 
-### Phase 4 — Camera Characterization and Vision
+### Phase 4 — Initial Automation and JPEG Characterization
 
+- [x] Develop and test an automated exposure-sweep workflow
 - [x] Verify applied exposure times using saved frame metadata
 - [x] Complete initial processed-JPEG brightness-response analysis
 
-- [ ] Perform controlled quantitative exposure and gain characterization using suitable sensor data
-- [ ] Sensor noise and image-uniformity measurements
-- [ ] Raw image acquisition and analysis
-- [ ] LED recognition and hand-gesture experiments
-- [ ] Hardware monitoring and alarms
+### Phase 5 — Phoebus Control and Image Visualization
 
-### Phase 5 — Phoebus and Image Visualization
+- [x] Develop a Phoebus camera-control interface
+- [x] Display camera status, settings, and acquisition paths
+- [x] Display acquired RGB images using a separate Python PVAccess publisher
+- [x] Automatically update the displayed image after acquisition
+- [ ] Evaluate image resolution and transfer performance
 
-- [ ] Develop a Phoebus camera-control interface
-- [ ] Display camera status and acquisition settings
-- [ ] Investigate transferring image arrays through EPICS
-- [ ] Display the latest acquired image in Phoebus
-- [ ] Evaluate image-transfer performance on Raspberry Pi Zero 2 W
+### Phase 6 — LED Recognition (Next)
 
-### Phase 6 — areaDetector
+- [ ] Investigate LED recognition using camera images
+- [ ] Define the experiment and implementation approach
+
+### Phase 7 — Hand-Gesture Recognition
+
+- [ ] Explore hand-gesture detection and related image processing
+
+### Phase 8 — Hardware Monitoring and Alarms
+
+- [ ] Integrate electronic components and EPICS monitoring/alarm functionality
+
+### Phase 9 — Advanced Sensor Characterization (Deferred)
+
+- [ ] Perform controlled quantitative exposure and gain characterization
+- [ ] Investigate sensor noise and image uniformity
+- [ ] Acquire and analyze raw sensor data
+
+### Phase 10 — areaDetector
 
 - [ ] Set up areaDetector
 - [ ] Investigate IMX219-compatible driver integration
