@@ -665,7 +665,7 @@ As development continues, this guide will expand to cover:
 - Unexpected TCP disconnects and recovery (newline framing is now implemented).
 - EPICS alarm states and hardware-health reporting.
 - Reliable synchronization and message routing when unsolicited events share a request-response TCP connection.
-- Phoebus image display and image-array transport through EPICS (expanded PVAccess testing is complete).
+- Image-display connection failures, stale image PVs, and PVAccess publisher availability (basic Phoebus RGB image display is working).
 
 ## 23. EPICS `mbbo` Camera Command Mapping
 
@@ -806,7 +806,7 @@ caget -S CAM:GetLatestMetadataPath
 camonitor -S CAM:GetStatus CAM:GetLatestImagePath CAM:GetLatestMetadataPath
 ```
 
-Simultaneous monitoring worked. The waveform avoids the conventional short-string capacity limit; it contains a **file path**, not JPEG image bytes. This does not yet provide image display in Phoebus.
+Simultaneous monitoring worked. The waveform avoids the conventional short-string capacity limit; it contains a **file path**, not JPEG image bytes. These path PVs do not themselves contain image bytes. Image display is now provided separately through the Python PVAccess publisher.
 
 **Open issue:** Multiple notifications share the command connection; repeated acquisition and error-path reliability should be stress-tested.
 
@@ -868,8 +868,7 @@ Likewise, a command protocol that is output-only cannot use its missing acknowle
 
 - Reliable parsing and acknowledgement handling under all mixed notification/command sequences.
 - Automatic status-description updates during acquisition.
-- Phoebus interface testing (the expanded PVAccess command and readback interface has been tested).
-- Image-byte transfer through EPICS (the current PVs expose paths only).
+- Further reliability and performance testing of the working Phoebus interface and separate PVAccess RGB image publisher.
 - Complete disconnect/reconnect recovery and error-path behavior.
 
 
@@ -1019,6 +1018,98 @@ However, both `camonitor` and `pvmonitor` occasionally failed to display the bri
 
 **Current decision:** Keep this as a known limitation. Automated acquisition uses a changed image path and matching metadata path rather than requiring every intermediate status event. No artificial delay was added to force status visibility.
 
+## 40. `p4p` Import Errors During Image-Publisher Setup
+
+**Symptom**
+
+The `p4p` package installed successfully, but the initial test imports failed:
+
+```text
+ImportError: cannot import name 'Server' from 'p4p.server.thread'
+ImportError: cannot import name 'StaticProvider' from 'p4p.server.thread'
+```
+
+**Cause**
+
+The requested classes were imported from the wrong module. Successful package installation does not mean every class is available from the same import path.
+
+**Resolution**
+
+The following imports worked with the installed `p4p` version:
+
+```python
+from p4p.server import Server, StaticProvider
+from p4p.server.thread import SharedPV
+```
+
+A compatible prebuilt `p4p` 4.3.0 wheel was available for CPython 3.13 on the Raspberry Pi's ARM Linux environment. The package was installed inside the project's virtual environment. A separate test publisher successfully served an image array to `pvget` and Phoebus.
+
+## 41. Phoebus Image Widget Displayed Incorrect RGB Colors
+
+**Symptom**
+
+The first RGB image displayed with incorrect colors or colored stripes, even though the PVAccess array could be read successfully.
+
+**Cause investigated**
+
+The Python publisher provides interleaved 8-bit RGB pixel values. Phoebus must interpret the array using a matching color mode and unsigned byte values.
+
+**Working configuration**
+
+| Image widget property | Value |
+|---|---|
+| PV Name | `pva://CAM:Image` |
+| Data Width | `100` |
+| Data Height | `100` |
+| Color Mode | `TYPE_RGB1` |
+| Unsigned Data | Enabled |
+
+The standalone proof-of-concept used `CAM:ImageTest`; the renamed publisher uses `CAM:Image`. The combination of `TYPE_RGB1` and **Unsigned Data** produced the expected color image. The image is a resized display copy; the original JPEG is preserved.
+
+## 42. Image PV Displays Black or Does Not Refresh
+
+**Observed behavior and checks**
+
+The image publisher initializes its image PV with a black array. A black display can therefore mean that no saved JPEG has been published yet; it does not by itself prove a Phoebus connection failure.
+
+The separate `acquisition/pva_image_publisher.py` program reads `CAM:GetLatestImagePath` through PyEpics, loads the saved JPEG on the Raspberry Pi, and publishes the resized RGB array through `p4p`. It must be running independently of the camera TCP server and IOC.
+
+If the image remains black or stale, check the publisher terminal for `Published image: ...`, `Image file not found`, or publication errors. Also confirm that Phoebus uses `pva://CAM:Image`, not the earlier test PV name, and that `CAM:GetLatestImagePath` changes after acquisition.
+
+The current publisher checks the path periodically. It may not display every intermediate acquisition if several images are captured between checks. The JPEG files remain on the Raspberry Pi; Phoebus receives the resized pixel array, not the original file.
+
+## 43. Exposure and Gain Readbacks Initially Displayed Zero
+
+**Symptom**
+
+After IOC startup, Phoebus and `caget` initially displayed zero for exposure and gain setpoints/readbacks. Writing a valid exposure or gain through EPICS updated both the setpoint and the FLNK-triggered readback correctly.
+
+**Database change**
+
+`PINI = "YES"` was added to the passive `GetExposure`, `GetGain`, and `GetAutoExposure` readback records to request their values during IOC initialization. It was **not** added to the setter records: processing an output record at startup could send an unwanted initial value, such as zero, to the Python server.
+
+The `EGU = "us"` field was also added to the exposure setter and readback records to identify the unit as microseconds.
+
+**Limitation**
+
+`PINI` only requests processing at IOC initialization. It does not guarantee a successful read if the TCP service is unavailable, automatically synchronize setter PV values, or handle later reconnections. The readback initialization should be checked after IOC startup.
+
+## 44. Intermittent `SetAutoExposure` Response Mismatch
+
+**Observed error**
+
+```text
+CAM_PORT CAM:SetAutoExposure: Input "STATUS:IDLE"
+CAM_PORT CAM:SetAutoExposure: mismatch after 0 bytes ""
+CAM_PORT CAM:SetAutoExposure: got "STATUS:IDL..." where "OK" was expected
+```
+
+`setAutoExposure` sends `AUTO_EXPOSURE <value>` and expects `OK`. The same TCP connection also carries unsolicited status messages. In the observed case, StreamDevice encountered `STATUS:IDLE` where it expected the acknowledgement.
+
+The requested setting and other camera functions worked in the reported test. Subsequent tests from both the terminal and Phoebus did not reproduce the mismatch. The exact timing and message-routing cause remain unresolved.
+
+The protocol was left unchanged. See the README's **Current Limitations and Open Questions** for the possible, untested investigation of `ExtraInput = Ignore;`; this option is not established as a solution to an unexpected status line arriving before `OK`.
+
 ---
 
-**Documentation status (24 October 2026):** EPICS-controlled acquisition, expanded PVAccess testing, PyEpics exposure-sweep automation, and initial JPEG characterization have been demonstrated. The earlier investigations remain as historical troubleshooting records. Communication robustness and rapid status-event visibility are still open limitations.
+**Documentation status (25 October 2026):** EPICS-controlled acquisition, expanded PVAccess testing, PyEpics automation, initial JPEG characterization, and Phoebus RGB image display through a separate Python publisher have been demonstrated. Earlier investigations remain as historical troubleshooting records. Communication robustness and rapid status-event visibility remain open limitations.
