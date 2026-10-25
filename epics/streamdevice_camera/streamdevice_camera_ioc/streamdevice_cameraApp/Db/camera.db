@@ -38,6 +38,7 @@ record(longout, "$(P)$(R)SetExposure") {
     field(OUT, "@stream_camera.proto setExposure $(PORT)")
     field(SCAN, "Passive")
     field(FLNK, "$(P)$(R)GetExposure")
+    field(EGU, "us")
 }
 
 # Read requested exposure time in microseconds
@@ -46,6 +47,8 @@ record(longin, "$(P)$(R)GetExposure") {
     field(DTYP, "stream")
     field(INP, "@stream_camera.proto getExposure $(PORT)")
     field(SCAN, "Passive")
+    field(EGU, "us")
+    field(PINI, "YES")
 }
 
 # Set requested analogue gain
@@ -65,6 +68,7 @@ record(ai, "$(P)$(R)GetGain") {
     field(INP, "@stream_camera.proto getGain $(PORT)")
     field(PREC, "3")
     field(SCAN, "Passive")
+    field(PINI, "YES")
 }
 
 # Enable or disable automatic exposure
