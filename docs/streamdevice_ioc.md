@@ -1,6 +1,6 @@
 # StreamDevice Camera IOC — Implementation Guide
 
-This guide documents the conventional EPICS IOC developed for the [EPICS-Controlled Camera Characterization and Vision Platform](../README.md). It covers the simulated TCP service, the conventional IOC and its CA/PVA support, standalone Picamera2 acquisition, and the expanded Python TCP camera server tested in October 2026. The expanded acquisition commands and event-driven status/file-path monitoring are integrated into the IOC and have been tested through Channel Access and PVAccess. Shared-port communication limitations remain documented below.
+This guide documents the conventional EPICS IOC developed for the [EPICS-Controlled Camera Characterization and Vision Platform](../README.md). It covers the simulated TCP service, the conventional IOC and its CA/PVA support, standalone Picamera2 acquisition, and the expanded Python TCP camera server tested in October 2026. The expanded acquisition commands and event-driven status/file-path monitoring are integrated into the IOC and have been tested through Channel Access and PVAccess. The separate Python PVAccess image publisher and Phoebus display are also described at an architectural level. Shared-port communication limitations remain documented below.
 
 For dependency installation, see [EPICS Environment Setup](epics_setup.md). For errors encountered during development, see [Troubleshooting](troubleshooting.md).
 
@@ -73,6 +73,7 @@ camera_vision_epics/
 ├── acquisition/
 │   ├── camera_server_simulator.py
 │   ├── picamera2_server.py
+│   ├── pva_image_publisher.py
 │   ├── tests/
 │   │   └── test_camera_acquisition.py
 │   └── images/   # generated files, ignored by Git
@@ -83,7 +84,8 @@ camera_vision_epics/
 │   └── notes/
 │       ├── epics_device_integration.md
 │       ├── test_picamera2_acquisition.md
-│       └── automated_acquisition_and_characterization.md
+│       ├── automated_acquisition_and_characterization.md
+│       └── pva_image_publisher.md  # separate implementation note (planned)
 ├── automation/
 │   └── exposure_sweep.py
 ├── characterization/
@@ -662,7 +664,7 @@ The Python service binds to `127.0.0.1`, limiting direct remote access to that s
 - Software-maintained state rather than independent sensor-health monitoring.
 - Incomplete recovery for exceptional socket/camera failures and silent disconnects.
 - Requested-setting readbacks, with actual settings recorded in metadata.
-- JPEG files on the Pi rather than EPICS image arrays or raw sensor data.
+- Original JPEG files remain on the Pi. A separate publisher provides a reduced-resolution RGB array through PVAccess, not raw sensor data.
 - Preview integration and areaDetector remain future work.
 
 The EPICS integration described in this historical section has been performed. Sections 20 and 21 describe the tested configuration, expanded PVA verification and remaining limitations.
@@ -750,7 +752,7 @@ record(longout, "$(P)$(R)SetExposure") {
 }
 ```
 
-The equivalent links are `SetGain → GetGain` and `SetAutoExposure → GetAutoExposure`. The getter protocols send `EXPOSURE?`, `GAIN?`, and `AUTO_EXPOSURE?`. Tests showed the setter command followed by the matching getter in Python's terminal, and the readback PVs updated without manual `.PROC`.
+The equivalent links are `SetGain → GetGain` and `SetAutoExposure → GetAutoExposure`. The getter protocols send `EXPOSURE?`, `GAIN?`, and `AUTO_EXPOSURE?`. Tests showed the setter command followed by the matching getter in Python's terminal, and the readback PVs updated without manual `.PROC`. The exposure setter and readback now also specify `EGU = "us"`. The passive `GetExposure`, `GetGain`, and `GetAutoExposure` records use `PINI = "YES"` to request their values at IOC initialization. The output setter records do not use PINI, avoiding unintended writes of their initial values. Startup reads depend on the Python TCP service being reachable; PINI does not handle later reconnection or synchronize the setter values.
 
 For automatic exposure, the EPICS enum labels are `Disable=0`, `Enable=1`, matching Python's Boolean conversion. These readbacks do **not** establish the actual exposure/gain used by a captured frame; the JPEG's associated JSON metadata is the source for applied frame settings. FLNK does not detect changes originating outside these EPICS setters.
 
@@ -774,7 +776,7 @@ monitorLatestMetadataPath {
 }
 ```
 
-Both database records use `SCAN="I/O Intr"`, `FTVL="CHAR"` and `NELM="512"`. The ordinary EPICS string record has a short fixed capacity; a CHAR waveform stores a longer path as character bytes (ASCII codes for these paths), terminated by zero. `caget -S` and `camonitor -S` display these arrays as readable text. A path is **not** the image contents: transferring an image array to Phoebus is a future phase.
+Both database records use `SCAN="I/O Intr"`, `FTVL="CHAR"` and `NELM="512"`. The ordinary EPICS string record has a short fixed capacity; a CHAR waveform stores a longer path as character bytes (ASCII codes for these paths), terminated by zero. `caget -S` and `camonitor -S` display these arrays as readable text. A path is **not** the image contents. A separate Python PVAccess publisher now provides a resized RGB image to Phoebus; this does not change the file-path waveform records.
 
 The path notifications are emitted only after successful acquisition; repeated acquisition and simultaneous `camonitor -S CAM:GetStatus CAM:GetLatestImagePath CAM:GetLatestMetadataPath` were tested. The monitor receives independently updated PVs, not one combined message.
 
@@ -792,9 +794,9 @@ The final database therefore keeps `GetStatusDescription` **Passive without a FL
 
 The single connection carries ordinary query responses, command acknowledgements, and unsolicited `STATUS:`, `IMAGE_PATH:` and `METADATA_PATH:` lines. Tests showed that an active `cameraCommand` expecting `in "OK"` sometimes received `STATUS:IDLE` or `STATUS:STREAMING` first, logging `got ... where "OK" was expected`. Switching `cameraCommand` to output-only avoided that particular expected-`OK` match, but **did not establish reliable message demultiplexing**; Python still sends `OK` for those commands.
 
-Rapid `IDLE → STREAMING → ACQUIRING` transitions were sometimes absent from `camonitor`, while the final state was correct. When acquiring from an already streaming camera, `ACQUIRING → STREAMING` appeared consistently in the tests. These observations suggest timing/dispatch effects but do not prove the exact root cause. Do not introduce arbitrary sleeps as a substitute for investigating message routing.
+Rapid `IDLE → STREAMING → ACQUIRING` transitions were sometimes absent from `camonitor`, while the final state was correct. When acquiring from an already streaming camera, `ACQUIRING → STREAMING` appeared consistently in the tests. These observations suggest timing/dispatch effects but do not prove the exact root cause. A later intermittent `CAM:SetAutoExposure` mismatch likewise showed `STATUS:IDLE` where `OK` was expected, although the controls worked and the error did not recur in subsequent tests. Do not introduce arbitrary sleeps as a substitute for investigating message routing.
 
-**Known limitation:** These tests demonstrate working status and file-path updates in the exercised scenarios, not guaranteed lossless delivery of all intermediate events or error-free mixed-message operation. Future work should examine message framing, transaction serialization, outstanding `OK` responses, error/status alarms and reconnection behavior; a dedicated event connection remains a possible fallback if required by reliability testing.
+**Known limitation:** These tests demonstrate working status and file-path updates in the exercised scenarios, not guaranteed lossless delivery of all intermediate events or error-free mixed-message operation. Future work should examine message framing, transaction serialization, outstanding `OK` responses, error/status alarms and reconnection behavior; a dedicated event connection remains a possible fallback if required by reliability testing. The StreamDevice option `ExtraInput = Ignore;` is an untested possibility for investigation, not a verified fix for a status notification arriving before the expected `OK`.
 
 ### 20.9 Reproducible tests and observed outcomes
 
@@ -834,8 +836,7 @@ Expected requested-setting readbacks were `40000`, `2.0` and `Disable` respectiv
 - Improve cleanup: `update_camera_status()` currently calls `connection.sendall()` directly, including when camera cleanup may occur after a socket disconnect. Guarding notification delivery and handling errors are needed.
 - Revisit initial synchronization after IOC restart or connection loss; `VAL=CLOSED` is a startup assumption.
 - Decide whether status descriptions should be derived from the status PV or published as their own events.
-- Develop Phoebus controls; the expanded PVAccess/QSRV interface has already been tested.
-- Investigate actual image-array transport for Phoebus separately from the working path readbacks.
+- The basic Phoebus controls and separate PVAccess image display are implemented; larger-image performance and reliability have not been characterized.
 
 ## 21. Expanded PVAccess testing and PyEpics automation
 
@@ -891,7 +892,38 @@ Reading an image path through EPICS does not transfer the image itself. The curr
 
 These scripts analyze saved files and do not require the IOC or camera to be running once the data is available. The results describe **processed JPEG output**; they do not establish intrinsic sensor linearity or noise performance. The detailed measurement procedure, code explanations and results are in [Automated Acquisition and Initial Camera Characterization](notes/automated_acquisition_and_characterization.md).
 
-## 22. References
+## 22. Phoebus control and separate PVAccess image display
+
+### 22.1 Division of responsibilities
+
+The existing StreamDevice IOC continues to handle camera commands, exposure and gain settings, camera status, and the latest JPEG/JSON file paths. Phoebus uses these IOC PVs for camera control and monitoring. No image-data waveform or additional asyn TCP port has been added to the IOC.
+
+Image display is provided by a **separate Python program**, `acquisition/pva_image_publisher.py`, using PyEpics, Pillow, NumPy and the `p4p` PVAccess library. It is not part of `picamera2_server.py` and can be started only when image visualization is needed.
+
+```text
+Phoebus on Windows
+    |-- CA/PVA --> conventional IOC --> StreamDevice/asyn --> TCP 5000 --> camera server --> IMX219
+    |-- PVA ----> CAM:Image (separate Python p4p publisher)
+                               ^
+                               | reads saved JPEG on Raspberry Pi
+                        CAM:GetLatestImagePath (via PyEpics)
+```
+
+### 22.2 Image update workflow
+
+After an acquisition, the camera server saves the full-resolution JPEG and matching metadata on the Raspberry Pi. The IOC publishes the latest JPEG path through `CAM:GetLatestImagePath`. The image publisher checks this PV, detects a new path, opens the corresponding saved JPEG, converts it to RGB, and resizes it to 100 × 100 pixels. The resulting flattened unsigned 8-bit array is published as `CAM:Image` through PVAccess.
+
+The current publisher checks the path periodically rather than subscribing to a monitor callback. It can therefore miss intermediate images if several acquisitions finish between checks. The image publisher must run on a computer that can access the JPEG paths returned by the IOC; in the current setup it runs on the Raspberry Pi. The original JPEG and metadata are not transferred to Windows by this PV.
+
+The Phoebus Image widget was tested with `pva://CAM:Image`, width and height set to 100, color mode `TYPE_RGB1`, and **Unsigned Data** enabled. The RGB image updated after a new acquisition. This is image visualization, not live video streaming or an areaDetector/NTNDArray implementation.
+
+The Python code, `NTScalar("aB")`, `SharedPV`, `StaticProvider`, array layout, and run instructions can be documented separately in [PVAccess Image Publisher](notes/pva_image_publisher.md) once that note is added.
+
+### 22.3 IOC database refinements
+
+The exposure setter and readback records include `EGU = "us"` to label exposure times in microseconds. The passive exposure, gain and automatic-exposure readback records use `PINI = "YES"` to request initial values when the IOC starts. Setter records remain passive without PINI to avoid sending unintended default commands. The readback initialization depends on successful communication with the Python camera server and does not automatically refresh after reconnection.
+
+## 23. References
 
 - [EPICS Documentation](https://docs.epics-controls.org/)
 - [EPICS Base](https://github.com/epics-base/epics-base)
@@ -904,4 +936,4 @@ These scripts analyze saved files and do not require the IOC or camera to be run
 
 ---
 
-**Implementation status (24 October 2026):** EPICS-controlled acquisition, I/O Intr monitoring and FLNK parameter readbacks have been tested through CA and PVA. PyEpics exposure-sweep automation has also been tested. Shared-port communication robustness and Phoebus image transport remain open.
+**Implementation status (25 October 2026):** EPICS-controlled acquisition, I/O Intr monitoring, FLNK parameter readbacks and PyEpics automation have been tested. Phoebus camera controls and automatic display of reduced-resolution RGB images through a separate Python PVAccess publisher are working. Shared-port communication robustness, startup/reconnection synchronization and image-transfer performance remain open questions.
