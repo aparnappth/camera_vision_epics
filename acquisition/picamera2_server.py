@@ -19,6 +19,9 @@ from libcamera import Transform
 # Import math to validate numerical camera settings
 import math
 
+import threading
+import time
+
 # Define the IP address and port for the TCP server
 HOST = "127.0.0.1"
 PORT = 5000
@@ -44,10 +47,44 @@ status_messages = {
 auto_exposure = True
 exposure_time = 20000   # Microseconds
 analogue_gain = 1.0     # Unity gain
+# Actual settings reported by completed camera frames
+actual_exposure = None
+actual_gain = None
+
+METADATA_CHECK_INTERVAL = 0.2  # seconds
+GAIN_CHANGE_THRESHOLD = 0.01
+EXPOSURE_CHANGE_THRESHOLD = 10  # microseconds
 
 # Paths of the latest successfully acquired image and metadata
 last_image_path = "NONE"
 last_metadata_path = "NONE"
+
+
+# Manage the single TCP connection shared by commands and notifications.
+class TCPConnection:
+    def __init__(self):
+        self.connection = None
+        self.lock = threading.Lock()
+
+    def set_connection(self, connection):
+        with self.lock:
+            self.connection = connection
+
+    def send(self, message):
+        # Return False when no IOC is connected; propagate real socket errors.
+        with self.lock:
+            if self.connection is None:
+                return False
+            self.connection.sendall(message.encode("utf-8"))
+            return True
+
+    def clear_connection(self):
+        # Detach first so the worker cannot send to a closed socket.
+        with self.lock:
+            self.connection = None
+
+
+tcp = TCPConnection()
 
 
 # Find the IMX219 camera and return its camera index
@@ -72,17 +109,82 @@ def update_camera_status(new_status):
 
         # Send status notification through the existing TCP connection
         message = f"STATUS:{new_status}\n"
-        connection.sendall(message.encode("utf-8"))
+        tcp.send(message)
 
+# Read actual exposure and gain from completed frames
+def frame_callback(request):
+    global actual_exposure, actual_gain
+
+    metadata = request.get_metadata()
+
+    new_exposure = metadata.get("ExposureTime")
+    new_gain = metadata.get("AnalogueGain")
+
+    if new_exposure is not None:
+        actual_exposure = new_exposure
+
+    if new_gain is not None:
+        actual_gain = new_gain
+
+
+def monitor_actual_settings():
+    """Publish changed camera settings without blocking the frame callback."""
+    previous_exposure = None
+    previous_gain = None
+    previous_camera = None
+
+    while True:
+        time.sleep(METADATA_CHECK_INTERVAL)
+
+        cam = camera
+        if cam is None or not cam.started:
+            previous_exposure = None
+            previous_gain = None
+            previous_camera = None
+            continue
+
+        # A newly initialized camera needs fresh values, not old metadata.
+        if cam is not previous_camera:
+            previous_camera = cam
+            previous_exposure = None
+            previous_gain = None
+
+        exposure = actual_exposure
+        gain = actual_gain
+
+        if exposure is not None and (
+            previous_exposure is None
+            or abs(exposure - previous_exposure) >= EXPOSURE_CHANGE_THRESHOLD
+        ):
+            try:
+                if tcp.send(f"ACTUAL_EXPOSURE:{exposure}\n"):
+                    previous_exposure = exposure
+                    print(f"Actual exposure: {exposure} us")
+            except OSError as error:
+                print(f"Exposure notification failed: {error}")
+
+        if gain is not None and (
+            previous_gain is None
+            or abs(gain - previous_gain) >= GAIN_CHANGE_THRESHOLD
+        ):
+            try:
+                if tcp.send(f"ACTUAL_GAIN:{gain}\n"):
+                    previous_gain = gain
+                    print(f"Actual gain: {gain}")
+            except OSError as error:
+                print(f"Gain notification failed: {error}")
 
 
 # Initialize the IMX219 camera only if it is not already open
 def initialize_camera():
-    global camera
+    global camera, actual_exposure, actual_gain
 
     if camera is None:
         camera_id = find_camera()
+        actual_exposure = None
+        actual_gain = None
         camera = Picamera2(camera_id)
+        camera.post_callback = frame_callback
         update_camera_status("IDLE")
         print("IMX219 camera initialized successfully")
 
@@ -195,7 +297,7 @@ def stop_camera():
 
 # Close the camera and release its resources
 def close_camera():
-    global camera
+    global camera, actual_exposure, actual_gain
 
     # Check whether the camera has been initialized
     if camera is not None:
@@ -209,6 +311,8 @@ def close_camera():
 
         # Reset the global camera variable
         camera = None
+        actual_exposure = None
+        actual_gain = None
 
     # Update the camera operating state
     update_camera_status("CLOSED")
@@ -297,13 +401,9 @@ def acquire_image():
     last_image_path = str(image_path)
     last_metadata_path = str(metadata_path)
     # Notify EPICS after successful acquisition
-    connection.sendall(
-    f"IMAGE_PATH:{last_image_path}\n".encode("utf-8")
-    )
+    tcp.send(f"IMAGE_PATH:{last_image_path}\n")
 
-    connection.sendall(
-    f"METADATA_PATH:{last_metadata_path}\n".encode("utf-8")
-    )
+    tcp.send(f"METADATA_PATH:{last_metadata_path}\n")
 
     return str(image_path), str(metadata_path)
 
@@ -340,7 +440,7 @@ def process_command(command):
             set_exposure(value)
             return "OK\n"
 
-        elif command == "EXPOSURE?":
+        elif command == "EXPOSURE_RB?":
             return f"{exposure_time}\n"
 
         elif command.startswith("GAIN "):
@@ -348,7 +448,7 @@ def process_command(command):
             set_gain(value)
             return "OK\n"
 
-        elif command == "GAIN?":
+        elif command == "GAIN_RB?":
             return f"{analogue_gain}\n"
 
         elif command.startswith("AUTO_EXPOSURE "):
@@ -373,68 +473,58 @@ def process_command(command):
         return f"ERROR: {error}\n"
 
 
-# Create an IPv4 TCP socket for communication with the EPICS IOC
+# Create the listening socket for the existing StreamDevice connection.
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-# Allow the socket address to be reused after restarting the server
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
-
-# Associate the server socket with the IP address and port
 server.bind((HOST, PORT))
-
-# Start listening for incoming TCP connections
 server.listen(1)
+
+# Monitor metadata independently of the TCP command loop.
+metadata_thread = threading.Thread(
+    target=monitor_actual_settings,
+    daemon=True,
+)
+metadata_thread.start()
 
 try:
     while True:
-        # Wait for IOC connection
         connection, address = server.accept()
         print(f"Connected by {address}")
-        # Create a buffered reader for newline-terminated TCP commands
-        reader = connection.makefile("r", encoding="utf-8")
+        tcp.set_connection(connection)
+        reader = None
 
-        while True:
-            # Wait until a complete newline-terminated command is received
-            data = reader.readline()
+        try:
+            reader = connection.makefile("r", encoding="utf-8")
+            while True:
+                data = reader.readline()
+                if not data:
+                    break
 
-            if not data:
-                break
-
-
-            # Remove the newline from the received command
-            command = data.strip()
-
-            # Display the command received from the IOC
-            print(f"Received command: {command}")
-
-            # Process the received command
-            response = process_command(command)
-
-            # Send resposne after processing command
-            connection.sendall(response.encode("utf-8"))
-
-        # Close the camera when the IOC disconnects
-        close_camera()
-
-        # Close the buffered reader
-        reader.close()
-
-        # Close the TCP connection
-        connection.close()
-
-        print("IOC disconnected")
+                command = data.strip()
+                print(f"Received command: {command}")
+                response = process_command(command)
+                tcp.send(response)
+        except OSError as error:
+            print(f"IOC communication failed: {error}")
+        finally:
+            # Do not let the metadata worker use this connection during cleanup.
+            tcp.clear_connection()
+            try:
+                close_camera()
+            except Exception as error:
+                print(f"Camera cleanup failed: {error}")
+            if reader is not None:
+                reader.close()
+            connection.close()
+            print("IOC disconnected")
 
 except KeyboardInterrupt:
-    # Handle Ctrl+C from the keyboard
     print("\nKeyboard interrupt: Stopping camera server")
-
-
 finally:
-    # Release camera resources when the Python server shuts down
-    close_camera()
-
-    # Close the TCP server socket
+    tcp.clear_connection()
+    try:
+        close_camera()
+    except Exception as error:
+        print(f"Camera cleanup failed: {error}")
     server.close()
-
     print("Camera server stopped")

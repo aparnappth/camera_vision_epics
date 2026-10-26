@@ -33,42 +33,60 @@ record(waveform, "$(P)$(R)GetStatusDescription") {
 
 # Set requested exposure time in microseconds
 record(longout, "$(P)$(R)SetExposure") {
-    field(DESC, "Set exposure time in microseconds")
+    field(DESC, "Set requested exposure")
     field(DTYP, "stream")
     field(OUT, "@stream_camera.proto setExposure $(PORT)")
     field(SCAN, "Passive")
-    field(FLNK, "$(P)$(R)GetExposure")
+    field(FLNK, "$(P)$(R)ExposureRB")
     field(EGU, "us")
 }
 
-# Read requested exposure time in microseconds
-record(longin, "$(P)$(R)GetExposure") {
-    field(DESC, "Get requested exposure time")
+# Read back requested exposure stored in Python
+record(longin, "$(P)$(R)ExposureRB") {
+    field(DESC, "Requested exposure readback")
     field(DTYP, "stream")
-    field(INP, "@stream_camera.proto getExposure $(PORT)")
+    field(INP, "@stream_camera.proto getExposureRB $(PORT)")
     field(SCAN, "Passive")
     field(EGU, "us")
     field(PINI, "YES")
+}
+
+# Actual exposure reported by camera frames
+record(longin, "$(P)$(R)GetExposure") {
+    field(DESC, "Actual camera exposure")
+    field(DTYP, "stream")
+    field(INP, "@stream_camera.proto monitorActualExposure $(PORT)")
+    field(SCAN, "I/O Intr")
+    field(EGU, "us")
 }
 
 # Set requested analogue gain
 record(ao, "$(P)$(R)SetGain") {
-    field(DESC, "Set analogue gain")
+    field(DESC, "Set requested analogue gain")
     field(DTYP, "stream")
     field(OUT, "@stream_camera.proto setGain $(PORT)")
     field(PREC, "3")
     field(SCAN, "Passive")
-    field(FLNK, "$(P)$(R)GetGain")
+    field(FLNK, "$(P)$(R)GainRB")
 }
 
-# Read requested analogue gain
-record(ai, "$(P)$(R)GetGain") {
-    field(DESC, "Get requested analogue gain")
+# Read back requested gain stored in Python
+record(ai, "$(P)$(R)GainRB") {
+    field(DESC, "Requested gain readback")
     field(DTYP, "stream")
-    field(INP, "@stream_camera.proto getGain $(PORT)")
+    field(INP, "@stream_camera.proto getGainRB $(PORT)")
     field(PREC, "3")
     field(SCAN, "Passive")
     field(PINI, "YES")
+}
+
+# Actual analogue gain reported by camera frames
+record(ai, "$(P)$(R)GetGain") {
+    field(DESC, "Actual camera gain")
+    field(DTYP, "stream")
+    field(INP, "@stream_camera.proto monitorActualGain $(PORT)")
+    field(PREC, "3")
+    field(SCAN, "I/O Intr")
 }
 
 # Enable or disable automatic exposure

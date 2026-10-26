@@ -2,6 +2,9 @@
 # StreamDevice protocol for the Python camera TCP server
 
 Terminator = LF;
+#ReplyTimeout = 2000;
+#ReadTimeout = 2000;
+ExtraInput = Ignore;
 
 # Read current camera operating status
 getStatus {
@@ -28,9 +31,9 @@ setExposure {
     in "OK";
 }
 
-# Read requested exposure time
-getExposure {
-    out "EXPOSURE?";
+# Read back requested exposure time
+getExposureRB {
+    out "EXPOSURE_RB?";
     in "%d";
 }
 
@@ -40,9 +43,9 @@ setGain {
     in "OK";
 }
 
-# Read requested analogue gain
-getGain {
-    out "GAIN?";
+# Read back requested analogue gain
+getGainRB {
+    out "GAIN_RB?";
     in "%f";
 }
 
@@ -56,6 +59,16 @@ setAutoExposure {
 getAutoExposure {
     out "AUTO_EXPOSURE?";
     in "%d";
+}
+
+# Monitor camera-reported exposure
+monitorActualExposure {
+    in "ACTUAL_EXPOSURE:%d";
+}
+
+# Monitor camera-reported analogue gain
+monitorActualGain {
+    in "ACTUAL_GAIN:%f";
 }
 
 # Read path of the latest acquired image
