@@ -848,9 +848,9 @@ A forward link from the I/O Intr status record triggered `STATUS_DESC?` during a
 
 **Current decision:** Remove the status-to-description `FLNK`. Keep `CAM:GetStatusDescription` passive and query it explicitly when needed. Increasing `ReplyTimeout` might reduce some timeouts but would not solve shared-port message routing. Automatic description updates remain postponed.
 
-## 31. Camera Cleanup and Shared-Connection Failure Risk
+## 31. Camera Cleanup and Shared-Connection Failure Risk — Historical Implementation
 
-The current `update_camera_status()` directly calls `connection.sendall(...)`. It may also be called from `close_camera()` during detected disconnect or shutdown. A connection variable may exist but refer to an already closed socket; sending can raise `OSError` and interrupt cleanup. The current Python server does not fully guard this case.
+The earlier `update_camera_status()` directly called `connection.sendall(...)`. It may also be called from `close_camera()` during detected disconnect or shutdown. A connection variable may exist but refer to an already closed socket; sending can raise `OSError` and interrupt cleanup. This risk motivated the later TCP connection-management refactoring; full disconnect and failure recovery still require testing.
 
 Likewise, a command protocol that is output-only cannot use its missing acknowledgement to confirm failure. Python's `ERROR: ...` responses may also be unsolicited relative to such a protocol. These are **remaining robustness issues**, not tested fixes.
 
@@ -927,7 +927,7 @@ caget CAM:GetStatus
 
 After the IOC started, `epics.caget("CAM:GetStatus")` worked. A successful Python import does not imply that an IOC is available on the network.
 
-## 35. Exposure Readback Initially Returned an Old Value
+## 35. Exposure Readback Initially Returned an Old Value — Historical PV Names
 
 **Symptom**
 
@@ -952,7 +952,7 @@ while True:
     time.sleep(0.05)
 ```
 
-This checks the requested value maintained by the Python server, **not** the sensor-applied exposure. The applied value is checked separately using the captured frame's JSON metadata.
+This historical example checks the requested value maintained by the Python server, **not** the sensor-applied exposure. In the 26 October interface, the requested readback was renamed to `CAM:ExposureRB`, while `CAM:GetExposure` now reports the latest frame-metadata value during streaming. The saved JSON metadata remains the source for the specific acquired frame.
 
 ## 36. Acquisition Completion and File-Path Monitoring
 
@@ -1078,7 +1078,7 @@ If the image remains black or stale, check the publisher terminal for `Published
 
 The current publisher checks the path periodically. It may not display every intermediate acquisition if several images are captured between checks. The JPEG files remain on the Raspberry Pi; Phoebus receives the resized pixel array, not the original file.
 
-## 43. Exposure and Gain Readbacks Initially Displayed Zero
+## 43. Exposure and Gain Readbacks Initially Displayed Zero — Historical PV Names
 
 **Symptom**
 
@@ -1086,13 +1086,13 @@ After IOC startup, Phoebus and `caget` initially displayed zero for exposure and
 
 **Database change**
 
-`PINI = "YES"` was added to the passive `GetExposure`, `GetGain`, and `GetAutoExposure` readback records to request their values during IOC initialization. It was **not** added to the setter records: processing an output record at startup could send an unwanted initial value, such as zero, to the Python server.
+`PINI = "YES"` was added to the then-current passive `GetExposure`, `GetGain`, and `GetAutoExposure` readback records to request their values during IOC initialization. It was **not** added to the setter records: processing an output record at startup could send an unwanted initial value, such as zero, to the Python server.
 
 The `EGU = "us"` field was also added to the exposure setter and readback records to identify the unit as microseconds.
 
 **Limitation**
 
-`PINI` only requests processing at IOC initialization. It does not guarantee a successful read if the TCP service is unavailable, automatically synchronize setter PV values, or handle later reconnections. The readback initialization should be checked after IOC startup.
+`PINI` only requests processing at IOC initialization. It does not guarantee a successful read if the TCP service is unavailable, automatically synchronize setter PV values, or handle later reconnections. The readback initialization should be checked after IOC startup. On 26 October, the requested-value readbacks became `ExposureRB` and `GainRB`; the new actual-value `GetExposure` and `GetGain` records use I/O Intr and are not initialized by PINI.
 
 ## 44. Intermittent `SetAutoExposure` Response Mismatch
 
@@ -1108,8 +1108,37 @@ CAM_PORT CAM:SetAutoExposure: got "STATUS:IDL..." where "OK" was expected
 
 The requested setting and other camera functions worked in the reported test. Subsequent tests from both the terminal and Phoebus did not reproduce the mismatch. The exact timing and message-routing cause remain unresolved.
 
-The protocol was left unchanged. See the README's **Current Limitations and Open Questions** for the possible, untested investigation of `ExtraInput = Ignore;`; this option is not established as a solution to an unexpected status line arriving before `OK`.
+At the time of this observation, the protocol was left unchanged. On 26 October, `ExtraInput = Ignore;` was added globally for experimental testing. The option is not established as a solution to an unexpected status line arriving before `OK`.
+
+## 45. TCP Connection Refactoring and Actual-Value Monitoring — 26 October 2026
+
+**Reason for the change**
+
+The original Python server used a shared global `connection` variable and direct `connection.sendall(...)` calls in several functions. Adding live camera-reported exposure and gain monitoring introduced a second execution thread that also needed to send notifications. The server was reorganized to manage the accepted socket through a small `TCPConnection` class with `set_connection()`, `send()`, and `clear_connection()` methods. Its lock coordinates writes from the main command thread and metadata worker. The design still uses one accepted IOC TCP connection on port 5000; no additional server or port was introduced.
+
+**New measurement path**
+
+Picamera2's `post_callback` reads `ExposureTime` and `AnalogueGain` from completed-frame metadata without saving images. A lightweight worker checks the latest values periodically and sends `ACTUAL_EXPOSURE:<value>` and `ACTUAL_GAIN:<value>` notifications when the change meets the configured thresholds. The initial thresholds are 10 microseconds for exposure and 0.01 for gain; they control reporting, not camera settings or measurement accuracy.
+
+The EPICS interface now distinguishes requested and camera-reported values:
+
+| PV | Source and processing |
+|---|---|
+| `CAM:ExposureRB` | Requested exposure stored in Python; passive readback via FLNK/PINI |
+| `CAM:GainRB` | Requested gain stored in Python; passive readback via FLNK/PINI |
+| `CAM:GetExposure` | Latest camera-reported exposure; I/O Intr notification |
+| `CAM:GetGain` | Latest camera-reported gain; I/O Intr notification |
+
+The corresponding requested-value TCP queries are now `EXPOSURE_RB?` and `GAIN_RB?`, rather than `EXPOSURE?` and `GAIN?`. Historical examples in earlier sections retain the original names to document the problems as encountered. The existing `automation/exposure_sweep.py` must be reviewed and updated to use `CAM:ExposureRB` before its next run; the former `CAM:GetExposure` no longer has requested-readback semantics.
+
+**Verification and remaining limitations**
+
+The refactored Python server passed a syntax check and produced expected results in direct Netcat testing. After the StreamDevice protocol and database changes, the requested and actual readbacks were reported to work in Phoebus. This does not establish exhaustive reliability under concurrent notifications, disconnections, or long acquisitions.
+
+`ExtraInput = Ignore;` is now enabled globally in `stream_camera.proto` as an experiment. `ReplyTimeout` and `ReadTimeout` were left commented out globally, retaining StreamDevice defaults where no local override applies. No new intermittent mismatch was reported in the latest Phoebus test, but the earlier shared-port issue is not considered resolved. The socket lock prevents overlapping writes from cooperating Python threads; it does not guarantee that a status or metadata notification cannot arrive before an expected `OK` response.
+
+When the camera is not producing frames, actual-value PVs may retain their last reported values. Stale-value indication and reconnection synchronization remain future improvements. For implementation details, see [StreamDevice Camera IOC](streamdevice_ioc.md) and [TCP Connection and Metadata Monitoring](notes/tcp_connection_and_metadata_monitoring.md).
 
 ---
 
-**Documentation status (25 October 2026):** EPICS-controlled acquisition, expanded PVAccess testing, PyEpics automation, initial JPEG characterization, and Phoebus RGB image display through a separate Python publisher have been demonstrated. Earlier investigations remain as historical troubleshooting records. Communication robustness and rapid status-event visibility remain open limitations.
+**Documentation status (26 October 2026):** EPICS-controlled acquisition, expanded PVAccess testing, initial PyEpics automation, JPEG characterization, and Phoebus RGB image display have been demonstrated. The refactored TCP manager and actual exposure/gain monitoring were tested through Netcat and Phoebus. Earlier investigations remain historical records. Shared-port communication robustness, stale actual-value indication, and rapid status-event visibility remain open limitations. The existing exposure-sweep script needs its requested-readback PV reference updated before reuse.
