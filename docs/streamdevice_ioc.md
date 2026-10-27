@@ -1,6 +1,6 @@
 # StreamDevice Camera IOC — Implementation Guide
 
-This guide documents the conventional EPICS IOC developed for the [EPICS-Controlled Camera Characterization and Vision Platform](../README.md). It covers the simulated TCP service, the conventional IOC and its CA/PVA support, standalone Picamera2 acquisition, and the expanded Python TCP camera server tested in October 2026. The expanded acquisition commands and event-driven status/file-path monitoring are integrated into the IOC and have been tested through Channel Access and PVAccess. The separate Python PVAccess image publisher and Phoebus display are also described at an architectural level. Section 23 describes the tested 26 October refactoring and supersedes earlier requested-value PV names and direct socket-write examples. Shared-port communication limitations remain documented below.
+This guide documents the conventional EPICS IOC developed for the [EPICS-Controlled Camera Characterization and Vision Platform](../README.md). It covers the simulated TCP service, the conventional IOC and its CA/PVA support, standalone Picamera2 acquisition, and the expanded Python TCP camera server tested in October 2026. The expanded acquisition commands and event-driven status/file-path monitoring are integrated into the IOC and have been tested through Channel Access and PVAccess. The separate Python PVAccess image publisher and Phoebus display are also described at an architectural level. Section 23 describes the 26 October TCP refactoring and actual-value monitoring. Section 24 documents the EPICS-controlled scanning implementation tested on 27 October. Older configurations are retained as explicitly historical examples; use the later sections for current PV names and operation. Shared-port communication limitations remain documented below.
 
 For dependency installation, see [EPICS Environment Setup](epics_setup.md). For errors encountered during development, see [Troubleshooting](troubleshooting.md).
 
@@ -80,17 +80,18 @@ camera_vision_epics/
 ├── docs/
 │   ├── epics_setup.md
 │   ├── streamdevice_ioc.md
+│   ├── implementation_and_results.md
 │   ├── troubleshooting.md
 │   └── notes/
 │       ├── epics_device_integration.md
 │       ├── test_picamera2_acquisition.md
-│       ├── automated_acquisition_and_characterization.md
+│       ├── automated_acquisition_and_characterization.md  # historical note
+│       ├── tcp_connection_and_metadata_monitoring.md
 │       └── pva_image_publisher.md
 ├── automation/
-│   └── exposure_sweep.py
-├── characterization/
-│   ├── check_exposure.py
-│   └── analyze_exposure_response.py
+│   └── camera_scan.py
+├── data/
+│   └── scan/  # generated CSV files; ignored by Git
 └── epics/
     └── streamdevice_camera/
         └── streamdevice_camera_ioc/
@@ -1002,9 +1003,122 @@ Exposure records use engineering units `us`; gain records display three decimal 
 
 The refactored Python server passed a syntax check and was exercised directly through Netcat. The updated IOC records and actual exposure/gain values were then tested successfully through Phoebus. This confirms operation for the scenarios exercised, **not** exhaustive reliability under concurrent messages, disconnects or rapid state changes.
 
-The older exposure-sweep script was written against `CAM:GetExposure` as a requested-value readback. It needs to use `CAM:ExposureRB` for that check before its next run. The current characterization scripts still use saved JPEG/JSON files; remote analysis requires access to those files. The proposed EPICS-controlled scan mode, scan-specific setter, scan configuration soft records and live exposure–intensity plotting are **planned for a later implementation**, not part of this tested milestone.
+The former `automation/exposure_sweep.py` and two standalone characterization scripts were retired from the active repository after their historical experiments. The current automation is `automation/camera_scan.py`, described in Section 24. The saved-image approach still requires local access to JPEG/JSON files; it does not transfer full-resolution images through an IOC PV.
 
-## 24. References
+## 24. EPICS-controlled camera scanning (27 October 2026)
+
+This section describes the **current scan implementation** and supersedes the earlier automation paths and planned-scan statements elsewhere in this guide. It extends the same IOC database; no second IOC, TCP connection or scan-specific StreamDevice protocol was introduced. The scan program is `automation/camera_scan.py`, a separate PyEpics client that communicates with IOC PVs through Channel Access.
+
+### 24.1 Division of responsibilities
+
+```text
+Phoebus / caput / caget
+         |
+         v
+EPICS IOC (camera.db)
+  |-- Scan configuration, commands, results: soft records
+  |-- Normal and scan-only exposure/gain setters: StreamDevice
+  |-- Requested-value readbacks: FLNK-triggered StreamDevice queries
+  |-- Actual exposure/gain and acquisition paths: I/O Intr
+         |
+         v
+StreamDevice + asyn --> TCP 127.0.0.1:5000 --> Picamera2 server --> IMX219
+         ^
+         |
+PyEpics camera_scan.py (reads scan PVs; sets camera controls;
+  acquires saved JPEG/JSON; computes intensity; publishes arrays/CSV)
+```
+
+The scan controller does not use Picamera2 directly. Its current intensity calculation reads a saved JPEG on the Raspberry Pi, so this version runs where those image paths are accessible. The separate `pva_image_publisher.py` remains responsible for Phoebus image display, not for scan execution.
+
+### 24.2 Scan configuration and control soft records
+
+| PV | Record | Purpose |
+|---|---|---|
+| `CAM:ScanEnable` | `bo` | Enable/disable scan mode |
+| `CAM:ScanType` | `mbbo` | Exposure (0) or Gain (1) |
+| `CAM:ScanStartExposure`, `CAM:ScanEndExposure` | `longout` | Exposure range, integer microseconds |
+| `CAM:ScanStartGain`, `CAM:ScanEndGain` | `ao` | Dimensionless analogue gain range |
+| `CAM:ScanPoints` | `longout` | Number of measurement points |
+| `CAM:StartScan`, `CAM:StopScan` | `bo` | Scan requests read by the PyEpics program |
+
+These are **soft records**: they hold scan parameters or command flags in the IOC and have no StreamDevice `DTYP`/`OUT` command. The scan program reads the configuration when executing a scan. Exposure and gain have separate start/end PVs because their units, numerical precision and valid ranges differ. The scan program validates parameters, including the waveform capacity limit of 100 points.
+
+The initial sequential controller polls the command PVs rather than registering PyEpics callbacks or creating additional Python threads. It acknowledges `StartScan` by resetting it to zero, checks `ScanEnable`, clears a stale `StopScan` request and runs the selected scan. It checks for Stop Scan at safe points; an in-progress blocking camera acquisition cannot be forcibly interrupted by this mechanism. Scan Enable triggers the controller to disable automatic exposure through the existing `CAM:SetAutoExposure` PV; it is verified before a scan. The auto-exposure setter is not currently protected by a database-level scan interlock.
+
+### 24.3 Database-level interlocks and dedicated scan setters
+
+The normal exposure and gain setters must not process while scan mode is enabled, but the automation must still be able to change the camera settings. The database therefore has two sets of output records sharing the **same existing StreamDevice protocols** (`setExposure` and `setGain`).
+
+```text
+# Added to the normal SetExposure and SetGain records
+field(SDIS, "$(P)$(R)ScanEnable")
+field(DISV, "1")
+
+# Added to the ScanSetExposure and ScanSetGain records
+field(SDIS, "$(P)$(R)ScanEnable")
+field(DISV, "0")
+```
+
+| `ScanEnable` | Normal `SetExposure` / `SetGain` | `ScanSetExposure` / `ScanSetGain` |
+|---|---|---|
+| 0 | Processes normally | Processing disabled |
+| 1 | Processing disabled | Processes normally |
+
+The scan-specific records are `longout` (`CAM:ScanSetExposure`) and `ao` (`CAM:ScanSetGain`), with passive StreamDevice output and forward links to `CAM:ExposureRB` and `CAM:GainRB` respectively. Both sets of setters use the same TCP camera server commands. No new `.proto` command was needed.
+
+**Important:** `SDIS` disables record *processing*, not necessarily writes to its `VAL` field, and does not enforce client identity or exclusive ownership of the scan-only PVs. The scan program also needs to validate its settings and check the requested readback. These interlocks were tested through Phoebus for the intended normal/scan modes.
+
+During initial testing, `SDIS` links included the `CP` modifier. This caused the normal exposure/gain setters to process their default zero values during IOC initialization, producing Python validation errors (`Exposure time must be positive`, `Analogue gain must be a finite, positive number`). Both setters had `PINI=NO` and `SCAN=Passive`; removing `CP` from the `SDIS` links resolved the observed startup errors. **Do not reintroduce `CP`** for these disable links: the disable condition is evaluated when a setter processes, without requesting processing whenever Scan Enable changes.
+
+### 24.4 Scan status and measurement results
+
+| PV | Record | Data |
+|---|---|---|
+| `CAM:ScanStatus` | `mbbo` | IDLE, RUNNING, COMPLETED, STOPPED, ERROR |
+| `CAM:ScanProgress` | `longout` | Number of completed points |
+| `CAM:ScanMeanIntensity` | `ao` | Latest mean grayscale JPEG intensity |
+| `CAM:ScanExposure` | `waveform` | Exposure X values from captured-frame metadata |
+| `CAM:ScanGain` | `waveform` | Gain X values from captured-frame metadata |
+| `CAM:ScanIntensity` | `waveform` | Corresponding mean intensity Y values |
+
+The waveform records use `FTVL="DOUBLE"` and `NELM="100"`. `NELM` is the allocated maximum; `NORD` reports the valid number of elements. The scan program publishes growing arrays after each completed measurement. The X values come from the saved JSON metadata associated with the same JPEG used for the Y intensity calculation, rather than from a potentially independently updated live readback.
+
+A simple array test used `caput -a` to write three values and verified `NORD=3`. Ordinary `caget` displayed the full 100-element capacity, including trailing zeros, while `pvget` returned only the valid values in the tested setup. For example:
+
+```bash
+caput -a CAM:ScanExposure 3 5000 10000 20000
+caget CAM:ScanExposure.NORD
+pvget CAM:ScanExposure
+```
+
+### 24.5 Sequential scan workflow and outputs
+
+The current `camera_scan.py` uses persistent `epics.PV()` objects and their `.get()`/`.put()` methods. It waits for Start Scan, reads and validates the selected range, disables/verifies automatic exposure, and iterates over scan points. For each point it writes through `CAM:ScanSetExposure` or `CAM:ScanSetGain`, waits for `CAM:ExposureRB` or `CAM:GainRB`, requests `Acquire`, waits for a new JPEG path and matching JSON path, reads the saved files, computes mean 8-bit grayscale intensity, and updates the status, progress and waveform PVs. It also saves a timestamped CSV under `data/scan/`. JPEG and JSON files are stored under `acquisition/images/`.
+
+The scan uses a changed `CAM:GetLatestImagePath` and matching `CAM:GetLatestMetadataPath` as practical acquisition-completion indicators. The camera-command StreamDevice protocol remains output-only, so a successful PV write is not itself a completion acknowledgement. The arrays are held in IOC memory and are not a replacement for saved CSV data. The scan program currently uses a single NaN placeholder when resetting plot waveforms; this is a one-element array, not a true empty array.
+
+### 24.6 Phoebus XY Plot and CA/PVA array-length behavior
+
+A Phoebus XY Plot initially showed an unwanted `(0, 0)` point. In the tested configuration, Channel Access exposed the full 100-element waveform capacity with trailing zeros, even though both waveform `NORD` fields reflected the number of valid points. PVAccess (`pvget`) returned the valid elements only. Changing the Phoebus trace PVs to explicit PVA addresses resolved the observed extra point:
+
+```text
+Exposure scan: X = pva://CAM:ScanExposure
+               Y = pva://CAM:ScanIntensity
+
+Gain scan:     X = pva://CAM:ScanGain
+               Y = pva://CAM:ScanIntensity
+```
+
+The trace type was changed from Step to Line for the exposure-response plot. Phoebus responsiveness was also reported as unusually slow during display testing; the cause was not established. This is an observation, not evidence of a specific PVA or waveform defect.
+
+### 24.7 Verification and remaining work
+
+**Tested:** scan PV definitions, numerical waveform writes, normal-versus-scan setter interlocks, a saved-JPEG exposure scan, metadata-based X values, mean-intensity publication, CSV logging and a Phoebus PVA XY Plot without the spurious origin point.
+
+**Not yet fully verified:** gain-scan execution, Stop Scan behavior, repeated-scan robustness, long scans, reconnection and mixed TCP notification reliability, performance of the Phoebus display, and a future in-memory intensity measurement mode that avoids saving each image. The old `exposure_sweep.py` and two standalone characterization scripts were removed from the active repository; their earlier experiments are documented in `implementation_and_results.md` and historical notes.
+
+## 25. References
 
 - [EPICS Documentation](https://docs.epics-controls.org/)
 - [EPICS Base](https://github.com/epics-base/epics-base)
@@ -1017,4 +1131,4 @@ The older exposure-sweep script was written against `CAM:GetExposure` as a reque
 
 ---
 
-**Implementation status (26 October 2026):** The refactored TCP connection manager and actual exposure/gain monitoring through a Picamera2 callback, lightweight worker and StreamDevice I/O Intr were tested with Netcat and Phoebus. Requested readbacks are now `ExposureRB` and `GainRB`; `GetExposure` and `GetGain` report camera-frame values. The separate Phoebus image publisher remains working. Existing automation needs the requested-readback PV rename before reuse. EPICS-controlled scans are planned. Shared-port message ordering, stale-value indication, reconnection behavior and image-transfer performance remain open questions.
+**Implementation status (27 October 2026):** The refactored TCP server and actual-value readbacks remain operational. The IOC now includes scan configuration, scan-only setters, `SDIS`/`DISV` interlocks and result waveform PVs. A sequential PyEpics exposure scan with saved JPEG/JSON data, mean-intensity calculation, CSV logging and live Phoebus PVAccess plotting was tested. Gain scanning, stop behavior, repeated-run robustness, shared-port message ordering and display performance remain to be verified.
