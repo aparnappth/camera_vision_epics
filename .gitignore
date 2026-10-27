@@ -29,3 +29,4 @@ epics/**/iocBoot/**/envPaths
 *~
 *.swp
 *.swo
+data/scan/

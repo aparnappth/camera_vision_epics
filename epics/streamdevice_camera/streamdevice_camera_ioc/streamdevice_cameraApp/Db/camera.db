@@ -39,6 +39,8 @@ record(longout, "$(P)$(R)SetExposure") {
     field(SCAN, "Passive")
     field(FLNK, "$(P)$(R)ExposureRB")
     field(EGU, "us")
+    field(SDIS, "$(P)$(R)ScanEnable")
+    field(DISV, "1")
 }
 
 # Read back requested exposure stored in Python
@@ -60,6 +62,20 @@ record(longin, "$(P)$(R)GetExposure") {
     field(EGU, "us")
 }
 
+# Set exposure during an automated scan
+record(longout, "$(P)$(R)ScanSetExposure") {
+    field(DESC, "Exposure setting for scan")
+    field(DTYP, "stream")
+    field(OUT, "@stream_camera.proto setExposure $(PORT)")
+    field(SCAN, "Passive")
+    field(FLNK, "$(P)$(R)ExposureRB")
+    field(EGU, "us")
+    field(SDIS, "$(P)$(R)ScanEnable")
+    field(DISV, "0")
+}
+
+
+
 # Set requested analogue gain
 record(ao, "$(P)$(R)SetGain") {
     field(DESC, "Set requested analogue gain")
@@ -68,6 +84,8 @@ record(ao, "$(P)$(R)SetGain") {
     field(PREC, "3")
     field(SCAN, "Passive")
     field(FLNK, "$(P)$(R)GainRB")
+    field(SDIS, "$(P)$(R)ScanEnable")
+    field(DISV, "1")
 }
 
 # Read back requested gain stored in Python
@@ -87,6 +105,18 @@ record(ai, "$(P)$(R)GetGain") {
     field(INP, "@stream_camera.proto monitorActualGain $(PORT)")
     field(PREC, "3")
     field(SCAN, "I/O Intr")
+}
+
+# Set analogue gain during an automated scan
+record(ao, "$(P)$(R)ScanSetGain") {
+    field(DESC, "Gain setting for scan")
+    field(DTYP, "stream")
+    field(OUT, "@stream_camera.proto setGain $(PORT)")
+    field(SCAN, "Passive")
+    field(FLNK, "$(P)$(R)GainRB")
+    field(PREC, "3")
+    field(SDIS, "$(P)$(R)ScanEnable")
+    field(DISV, "0")
 }
 
 # Enable or disable automatic exposure
@@ -130,3 +160,135 @@ record(waveform, "$(P)$(R)GetLatestMetadataPath") {
     field(SCAN, "I/O Intr")
 }
 
+# ==========================================
+# Scan Configuration and Control
+# ==========================================
+
+# Enable or disable exposure scan mode
+record(bo, "$(P)$(R)ScanEnable") {
+    field(DESC, "Enable exposure scan mode")
+    field(ZNAM, "Disable")
+    field(ONAM, "Enable")
+    field(VAL, "0")
+    field(SCAN, "Passive")
+}
+
+# Select exposure or gain scan
+record(mbbo, "$(P)$(R)ScanType") {
+    field(DESC, "Select scan parameter")
+    field(ZRST, "Exposure")
+    field(ONST, "Gain")
+    field(VAL, "0")
+    field(SCAN, "Passive")
+}
+
+# Number of scan points
+record(longout, "$(P)$(R)ScanPoints") {
+    field(DESC, "Number of scan points")
+    field(VAL, "5")
+    field(SCAN, "Passive")
+}
+
+# Starting exposure for scan
+record(longout, "$(P)$(R)ScanStartExposure") {
+    field(DESC, "Scan starting exposure")
+    field(EGU, "us")
+    field(VAL, "5000")
+    field(SCAN, "Passive")
+}
+
+# Ending exposure for scan
+record(longout, "$(P)$(R)ScanEndExposure") {
+    field(DESC, "Scan ending exposure")
+    field(EGU, "us")
+    field(VAL, "80000")
+    field(SCAN, "Passive")
+}
+
+# Starting analogue gain for scan
+record(ao, "$(P)$(R)ScanStartGain") {
+    field(DESC, "Scan starting gain")
+    field(PREC, "3")
+    field(VAL, "1.0")
+    field(SCAN, "Passive")
+}
+
+# Ending analogue gain for scan
+record(ao, "$(P)$(R)ScanEndGain") {
+    field(DESC, "Scan ending gain")
+    field(PREC, "3")
+    field(VAL, "4.0")
+    field(SCAN, "Passive")
+}
+
+# Mean intensity of the latest completed measurement
+record(ao, "$(P)$(R)ScanMeanIntensity") {
+    field(DESC, "Latest mean image intensity")
+    field(PREC, "3")
+    field(VAL, "0")
+    field(SCAN, "Passive")
+}
+
+# Report the current scan state
+record(mbbo, "$(P)$(R)ScanStatus") {
+    field(DESC, "Current scan status")
+    field(ZRST, "IDLE")
+    field(ONST, "RUNNING")
+    field(TWST, "COMPLETED")
+    field(THST, "STOPPED")
+    field(FRST, "ERROR")
+    field(VAL, "0")
+    field(SCAN, "Passive")
+}
+
+# Number of completed scan points
+record(longout, "$(P)$(R)ScanProgress") {
+    field(DESC, "Completed scan points")
+    field(VAL, "0")
+    field(SCAN, "Passive")
+}
+
+
+
+# Exposure values measured during the scan
+record(waveform, "$(P)$(R)ScanExposure") {
+    field(DESC, "Exposure scan X values")
+    field(FTVL, "DOUBLE")
+    field(NELM, "100")
+    field(SCAN, "Passive")
+}
+
+# Gain values measured during the scan
+record(waveform, "$(P)$(R)ScanGain") {
+    field(DESC, "Gain scan X values")
+    field(FTVL, "DOUBLE")
+    field(NELM, "100")
+    field(SCAN, "Passive")
+}
+
+
+
+# Measured mean intensity values
+record(waveform, "$(P)$(R)ScanIntensity") {
+    field(DESC, "Scan mean intensity values")
+    field(FTVL, "DOUBLE")
+    field(NELM, "100")
+    field(SCAN, "Passive")
+}
+
+
+# Trigger an automated scan
+record(bo, "$(P)$(R)StartScan") {
+    field(DESC, "Start scan command")
+    field(ZNAM, "Idle")
+    field(ONAM, "Start")
+    field(SCAN, "Passive")
+}
+
+# Request stopping the active scan
+record(bo, "$(P)$(R)StopScan") {
+    field(DESC, "Stop scan command")
+    field(ZNAM, "Idle")
+    field(ONAM, "Stop")
+    field(SCAN, "Passive")
+}
