@@ -123,264 +123,55 @@ IMX219
 
 This approach will investigate standard EPICS camera-control interfaces, NDArray image transport, image-processing plugins, and the differences between conventional device integration and areaDetector.
 
-## Implementation and Results
-
-### 1. Establishing EPICS-to-Python Communication
-
-The project began by developing a conventional EPICS IOC using StreamDevice and asyn to communicate with a Python-based camera simulator over TCP/IP.
-
-A simple `STATUS?` command was implemented to establish the communication chain between EPICS database records, StreamDevice, asyn, and the Python server.
-
-The system was tested locally on the Raspberry Pi and remotely from Windows Subsystem for Linux (WSL).
-
-PVAccess support was subsequently integrated using QSRV, allowing ordinary IOC database records to be accessed through both Channel Access and PVAccess.
-
-**Result:** A working conventional EPICS IOC capable of communicating with a Python device service through TCP/IP, with CA and PVA client access.
-
-### 2. Integrating the Physical IMX219 Camera
-
-The initial Python simulator was preserved, and a separate camera server was developed using Picamera2 and libcamera.
-
-The server identifies the physical IMX219 camera by its model name and provides reusable functions for camera initialization, configuration, streaming, and resource cleanup.
-
-The camera lifecycle was redesigned so that initialization occurs only when a camera operation requires it, rather than when the status is queried.
-
-The camera object remains initialized between acquisitions, while streaming can be started and stopped independently.
-
-Camera status is managed centrally using application-defined operating states.
-
-**Result:** A Python TCP service capable of managing the physical IMX219 camera without repeatedly opening and closing it for every acquisition.
-
-### 3. Developing and Testing Still-Image Acquisition
-
-Before integrating image acquisition into the TCP server, a standalone Picamera2 test was developed.
-
-The test established the complete still-image acquisition sequence, including camera configuration, streaming, image capture, and cleanup.
-
-Picamera2's `capture_request()` method was used to obtain a completed camera request containing both image data and associated acquisition metadata.
-
-The image is saved as a JPEG, while its metadata is saved separately in JSON format. Both originate from the same completed request.
-
-Timestamp-based filenames associate each image with its corresponding metadata.
-
-Manual exposure time and analogue gain were tested, and the actual applied values were verified using the acquisition metadata.
-
-The image orientation was also corrected by 180°, and VLC was used separately for camera positioning.
-
-**Result:** Successful full-resolution image acquisition with matching metadata, manual acquisition settings, and explicit resource management.
-
-### 4. Developing the Python TCP Camera-Control Server
-
-The Python camera server was expanded from a single status-query service into a camera-control interface.
-
-The implementation supports:
-
-- Camera initialization, starting, stopping, and closing.
-- Automatic and manual exposure control.
-- Requested exposure-time and analogue-gain settings and separate requested-value readbacks.
-- Camera-reported exposure and gain monitoring from completed-frame metadata while streaming.
-- Single-image acquisition with matching metadata.
-- Repeated image acquisition while the camera remains streaming.
-- Retrieval of the latest saved image and metadata file paths.
-- Centralized camera-state management.
-- Basic input validation and error reporting.
-- Camera cleanup on detected TCP disconnection and server shutdown.
-
-Camera operations remain organized into reusable functions, while a separate command processor interprets incoming TCP commands. The refactored `TCPConnection` class centralizes socket registration, message encoding, serialized writes, and connection detachment. The frame callback stores metadata without network writes; a lightweight worker sends changed values at a configured check interval, with thresholds for exposure and gain.
-
-Newline-delimited communication is used to identify complete commands and responses.
-
-The expanded Python server was tested independently using Netcat.
-
-Both single-image acquisition and repeated acquisition while streaming were verified, including image saving, metadata retrieval, and restoration of the previous streaming state.
-
-**Result:** A functional Python TCP camera-control server with independently tested acquisition and parameter-control capabilities.
-
-### 4.1 Refactoring TCP Communication and Monitoring Actual Settings (26 October 2026)
-
-The Python camera server was refactored to use a small `TCPConnection` class rather than direct socket writes from multiple functions. The class manages the accepted socket and a thread lock; it does not create a second server or TCP connection. All outgoing messages use a common sending method. The lock prevents overlapping writes from the main command loop and metadata worker, but does not guarantee that unsolicited notifications will be matched correctly by StreamDevice during command-response transactions.
-
-Picamera2's `post_callback` reads `ExposureTime` and `AnalogueGain` from completed-frame metadata while streaming. A lightweight worker checks the latest stored values and sends `ACTUAL_EXPOSURE:<value>` and `ACTUAL_GAIN:<value>` notifications when changes exceed the configured thresholds. These values are camera-reported applied settings, not independent hardware-register measurements.
-
-The requested-value TCP queries were renamed to `EXPOSURE_RB?` and `GAIN_RB?`. The corresponding EPICS records are `CAM:ExposureRB` and `CAM:GainRB`; `CAM:GetExposure` and `CAM:GetGain` now report actual values using input-only StreamDevice protocols and I/O Intr. This behavior was tested through Phoebus.
-
-**Result:** Requested and camera-reported exposure/gain values are available separately, with change-driven actual-value monitoring through the existing IOC.
-
-### 5. Integrating Camera Control into EPICS
-
-The previously tested Python camera operations were integrated into the conventional EPICS IOC by extending `stream_camera.proto` and `camera.db`.
-
-A single `mbbo` record, `CAM:CameraCommand`, was implemented for four camera operations:
-
-- `Start`
-- `Stop`
-- `Acquire`
-- `Close`
-
-The predefined EPICS states are converted by StreamDevice into the uppercase text commands understood by the Python server.
-
-An `mbbo` record was selected instead of `stringout` to provide predefined operator choices and a convenient interface for future Phoebus controls.
-
-The command record represents the last requested operation, while a separate status PV reports the camera's operating state.
-
-Exposure time, analogue gain, and automatic-exposure controls were integrated using appropriate numerical and enumerated EPICS record types.
-
-**Result:** Successful control of the physical IMX219 through EPICS, including repeated image acquisition and automatic/manual camera settings.
-
-### 6. Implementing Event-Driven Camera Status Monitoring
-
-The initial EPICS status record used passive processing and required an explicit processing request to obtain a fresh value.
-
-This was extended to use StreamDevice's **I/O Intr** mechanism.
-
-The Python server now publishes a status notification whenever its internal camera state changes.
-
-An input-only StreamDevice protocol receives these notifications and updates `CAM:GetStatus` automatically.
-
-The implementation was tested using `caget` and `camonitor`, confirming that the latest stored status can be retrieved without manually processing the record or configuring periodic status queries.
-
-The camera-status record is initialized to `CLOSED`, consistent with the normal Python server startup state.
-
-Tests also demonstrated intermediate acquisition transitions such as `ACQUIRING`, although rapidly occurring transitions were not always individually visible in the EPICS monitor.
-
-**Result:** Event-driven EPICS camera-status monitoring using the existing TCP connection, without adding a separate notification port.
-
-### 7. Implementing Parameter Readbacks Using Forward Links
-
-Exposure time, analogue gain, and automatic-exposure settings are controlled through EPICS output records.
-
-Each setter record uses an EPICS forward link (`FLNK`) to trigger processing of its corresponding readback record after the setting operation.
-
-This allows the IOC to request and store the updated value without requiring manual `.PROC` commands or periodic polling.
-
-Forward links were selected for these parameters because their requested values are normally changed through the corresponding EPICS setter records.
-
-This differs from camera status, which can change multiple times during a single operation and is therefore handled using I/O Intr.
-
-**Result:** Successfully tested automatic readbacks for exposure, gain, and automatic-exposure settings.
-
-### 8. Implementing Automatic Acquisition-File Readbacks
-
-The Python server stores the paths of the latest successfully acquired image and metadata files.
-
-After a successful acquisition, it sends separate notifications containing the JPEG and JSON file paths.
-
-StreamDevice receives these notifications through input-only protocols and updates the corresponding EPICS waveform records using I/O Intr.
-
-Character-array waveform records were selected because complete file paths can exceed the capacity of conventional EPICS string records.
-
-The paths can be displayed as readable strings using the `-S` option of EPICS client tools.
-
-Simultaneous monitoring of camera status, image path, and metadata path was successfully tested.
-
-**Result:** EPICS automatically provides the latest saved image and metadata locations following acquisition, without manual readback processing.
-
-### 9. Testing the Expanded PVAccess Interface
-
-QSRV makes ordinary IOC database records available through PVAccess as well as Channel Access. Camera commands, exposure, gain, automatic exposure, status, and acquisition-file paths were verified using `pvget`, `pvput`, and `pvmonitor`. The brief `ACQUIRING` state was occasionally absent from both `pvmonitor` and `camonitor` output. The cause has not been identified.
-
-**Result:** The expanded PVAccess interface is working for the tested controls and readbacks. Rapid intermediate status monitoring remains a known limitation.
-
-### 10. Automating Image Acquisition with PyEpics
-
-`automation/exposure_sweep.py` acquires a series of images at different exposure times. It uses PyEpics to communicate with the IOC rather than calling Picamera2 directly. This separates measurement automation from camera hardware control and allows the script to run on the Raspberry Pi or on another computer with access to the IOC.
-
-The original script disables automatic exposure, sets a fixed requested gain, and then repeats the following steps for each exposure value. The procedure below describes the previously tested workflow; the requested-value PV rename requires a corresponding script update before rerunning it:
-
-1. Write the requested exposure through EPICS.
-2. Wait for the requested-setting readback to match the request. The original script used `CAM:GetExposure`; after the 26 October PV rename it must use `CAM:ExposureRB`. The `FLNK`-triggered readback can finish after the write returns.
-3. Record the previous image path and send `Acquire`.
-4. Wait for `CAM:GetLatestImagePath` to change, with a timeout.
-5. Wait for the metadata path with the matching filename.
-6. Save the requested exposure, readback, gain setting, and both paths as one row in a CSV log.
-
-A change in the latest image path is used as the acquisition-completion indicator because the path is published after a successful image save and remains available for later reads. Unlike the short `ACQUIRING` state, it does not depend on observing a brief transition. This approach worked in the performed tests, but it is not a complete command-acknowledgement or failure-reporting system.
-
-**Result:** An automated five-point exposure sweep was completed successfully, with matching image and metadata paths recorded in a CSV file.
-
-### 11. Initial Exposure Verification and JPEG Analysis
-
-Two scripts under `characterization/` handle exposure verification and image analysis:
-
-- `check_exposure.py` reads the sweep CSV and each JSON metadata file, then compares the requested exposure with the exposure reported for the captured frame.
-- `analyze_exposure_response.py` reads the JPEG images, converts them to 8-bit grayscale using Pillow, and uses NumPy to calculate the mean, minimum, maximum, and standard deviation of pixel intensity. Matplotlib saves a plot of mean intensity against the camera-reported exposure time.
-
-Keeping acquisition and analysis in separate scripts allows saved datasets to be analyzed again without operating the camera. The analysis scripts select the latest timestamped sweep CSV when run from the repository root.
-
-An initial five-point sweep requested exposure times of 5, 10, 20, 40, and 80 ms. The corresponding frame metadata reported 4,990, 9,999, 19,999, 39,999, and 79,999 µs. The largest difference was 10 µs (0.2%) at the shortest setting.
-
-Additional sweeps were recorded under brighter illumination and after lens-focus adjustment. In the latest analyzed dataset, the mean grayscale intensity increased from 3.69 at 4.99 ms to 42.11 at 80 ms. The image-wide standard deviation also increased, but it includes differences in scene brightness and is not a direct measure of sensor noise.
-
-These are **processed JPEG measurements** influenced by the camera image-processing pipeline and the scene. They demonstrate the acquisition and analysis workflow and an increase in JPEG brightness with exposure time. They do not establish intrinsic sensor linearity or noise performance. Region-of-interest (ROI), raw-sensor linearity, and noise studies are outside the scope of this initial analysis.
-
-**Result:** Automated acquisition, exposure verification, basic image statistics, and exposure-response plotting have been tested.
-
-### 12. Phoebus Camera Control and Image Display
-
-A Phoebus Display Builder screen provides camera operations, exposure and gain controls, automatic-exposure selection, status readbacks, and the latest JPEG and metadata paths using the existing IOC PVs.
-
-For image display, the separate Python PVAccess publisher makes `CAM:Image` available without adding an image waveform to `camera.db` or changing `stream_camera.proto`. The publisher uses the latest saved image path to detect new acquisitions and publishes a resized RGB array. The Phoebus Image widget has been tested with `pva://CAM:Image`, width and height set to 100, `TYPE_RGB1`, and unsigned data enabled.
-
-The camera database includes `EGU = "us"` for exposure setpoint and readback records and `PINI = "YES"` for the requested-setting exposure, gain, and automatic-exposure readbacks. Actual exposure and gain instead use I/O Intr notifications from the metadata worker. Startup processing requests values from the Python server when communication is available; it does not automatically synchronize the corresponding setter PVs or guarantee recovery after reconnection.
-
-**Result:** Camera operation and automatic updates of acquired RGB images have been demonstrated in Phoebus. The publisher remains an independent process that must be running for image display to update.
+For the chronological development record, experiments and measured results, see [Implementation and Results](docs/implementation_and_results.md).
 
 ## Current EPICS Camera Interface
 
 | PV | Record type | Purpose |
 |---|---|---|
 | `CAM:CameraCommand` | `mbbo` | Start, Stop, Acquire, Close |
-| `CAM:GetStatus` | `stringin` | Current camera operating status |
-| `CAM:GetStatusDescription` | `waveform` | Human-readable status description |
-| `CAM:SetExposure` | `longout` | Requested exposure time |
-| `CAM:ExposureRB` | `longin` | Requested exposure setting readback |
-| `CAM:GetExposure` | `longin` | Camera-reported exposure from completed-frame metadata |
-| `CAM:SetGain` | `ao` | Requested analogue gain |
-| `CAM:GainRB` | `ai` | Requested gain setting readback |
-| `CAM:GetGain` | `ai` | Camera-reported analogue gain from completed-frame metadata |
-| `CAM:SetAutoExposure` | `mbbo` | Enable or disable automatic exposure |
-| `CAM:GetAutoExposure` | `mbbi` | Automatic-exposure readback |
-| `CAM:GetLatestImagePath` | `waveform` | Latest JPEG file path |
-| `CAM:GetLatestMetadataPath` | `waveform` | Latest JSON metadata path |
+| `CAM:GetStatus` | `stringin` | Camera operating status |
+| `CAM:GetStatusDescription` | `waveform` | Status description (passive) |
+| `CAM:SetExposure` / `CAM:ExposureRB` | `longout` / `longin` | Normal exposure setter / requested-setting readback |
+| `CAM:GetExposure` | `longin` | Camera-reported exposure from streaming frame metadata |
+| `CAM:SetGain` / `CAM:GainRB` | `ao` / `ai` | Normal gain setter / requested-setting readback |
+| `CAM:GetGain` | `ai` | Camera-reported gain from streaming frame metadata |
+| `CAM:SetAutoExposure` / `CAM:GetAutoExposure` | `mbbo` / `mbbi` | Automatic exposure control and readback |
+| `CAM:GetLatestImagePath` / `CAM:GetLatestMetadataPath` | `waveform` | Latest JPEG and JSON paths (CHAR arrays) |
+| `CAM:ScanEnable` | `bo` | Enable scan mode and normal-setter interlocks |
+| `CAM:ScanType` | `mbbo` | Exposure or Gain |
+| `CAM:ScanStartExposure` / `CAM:ScanEndExposure` | `longout` | Exposure range in µs |
+| `CAM:ScanStartGain` / `CAM:ScanEndGain` | `ao` | Gain range |
+| `CAM:ScanPoints` | `longout` | Number of scan points (maximum 100 in current waveforms) |
+| `CAM:StartScan` / `CAM:StopScan` | `bo` | Scan requests |
+| `CAM:ScanSetExposure` / `CAM:ScanSetGain` | `longout` / `ao` | Scan-specific camera setters |
+| `CAM:ScanStatus` | `mbbo` | IDLE, RUNNING, COMPLETED, STOPPED, ERROR |
+| `CAM:ScanProgress` | `longout` | Number of completed points |
+| `CAM:ScanMeanIntensity` | `ao` | Latest completed mean grayscale intensity |
+| `CAM:ScanExposure` / `CAM:ScanGain` | `waveform` | Exposure/gain X arrays |
+| `CAM:ScanIntensity` | `waveform` | Mean-intensity Y array |
 
 ### Record Processing Strategy
 
-| PV category | Mechanism |
-|---|---|
-| Camera operating status | I/O Intr |
-| Camera commands | Passive output |
-| Exposure, gain, auto-exposure setters | Passive output |
-| Requested exposure/gain and auto-exposure readbacks | Passive, triggered by FLNK; startup processing with PINI |
-| Actual exposure and gain | I/O Intr, driven by changed-frame-metadata notifications |
-| Latest image and metadata paths | I/O Intr |
-| Status description | Passive, explicitly processed when required |
+Camera status, actual exposure/gain and latest acquisition paths use StreamDevice I/O Intr. Requested-setting readbacks use passive records triggered by setter FLNK (with startup `PINI` for applicable readbacks). Scan configuration, status, progress and result arrays are soft IOC records updated through PyEpics; scan-specific hardware setters use the existing StreamDevice protocols. The scan setter interlocks use `SDIS` without `CP`.
 
-Requested exposure/gain readbacks and the automatic-exposure readback use `PINI = "YES"` to request their values during IOC initialization. Actual exposure/gain values require streaming frames; they are not initialized through PINI. Exposure PVs use the engineering unit `us`.
-
-The status-description readback is intentionally kept passive. Automatic updating through a forward link was investigated but postponed after timeout and message-handling issues were observed during acquisition.
-
-The detailed implementation and design decisions are documented in [StreamDevice Camera IOC](docs/streamdevice_ioc.md).
+The status-description readback remains passive because earlier automatic processing caused timeout and message-matching issues. See [StreamDevice Camera IOC](docs/streamdevice_ioc.md) for details.
 
 ## Local and Remote Operation
 
-The physical camera and its Python server run on the Raspberry Pi. EPICS provides the interface that other computers can use to control the camera.
+The IMX219, Picamera2 camera server and StreamDevice IOC run on the Raspberry Pi. Remote CA/PVA clients can operate the IOC, while the camera TCP service remains bound to `127.0.0.1:5000`.
 
-| Task or component | Where it runs or is stored |
+| Component or task | Current location |
 |---|---|
-| Picamera2, libcamera, and physical IMX219 | Raspberry Pi |
-| Python camera TCP server and StreamDevice IOC | Raspberry Pi (current setup) |
-| CA/PVA commands and monitoring | Raspberry Pi or a network-connected remote computer |
-| PyEpics exposure-sweep automation | Raspberry Pi or a remote computer with EPICS access |
-| Captured JPEG and JSON metadata | Saved on the Raspberry Pi |
-| Exposure-sweep CSV log | Saved on the computer running the automation script |
-| Exposure verification and JPEG analysis | Any computer that can access the CSV and its image/metadata files |
-| Phoebus camera controls and acquired-image display | Phoebus on a remote computer, using IOC PVs and `CAM:Image` |
-| Python p4p image publisher | Raspberry Pi, started as a separate program |
-| Published RGB image array | Transferred through PVAccess; original JPEG remains on the Pi |
+| Physical camera, Python TCP server and IOC | Raspberry Pi |
+| CA/PVA monitoring and camera commands | Pi or network-connected remote client |
+| `automation/camera_scan.py` (saved-JPEG intensity analysis) | Raspberry Pi, because it reads local JPEG and JSON files |
+| Acquired JPEG/JSON pairs | `acquisition/images/` on Raspberry Pi |
+| Scan CSV logs | `data/scan/` on Raspberry Pi in the tested workflow |
+| Separate p4p image publisher | Raspberry Pi, reads locally saved JPEGs |
+| Phoebus controls, image display and XY plot | Remote client; scan arrays use explicit `pva://` PVs |
 
-**Remote control does not transfer image files.** When a remote computer sends `Acquire`, the Raspberry Pi saves the image and metadata locally. The EPICS path PVs return file locations, not file contents. The CSV currently records absolute Raspberry Pi paths. Analysis on Windows or another computer requires access to the saved files and appropriate path handling. Portable dataset paths are not yet implemented. The separate image publisher reads local JPEG files on the Pi and transfers only a resized RGB pixel array through PVAccess for Phoebus display.
-
-The Python camera server uses the local loopback address `127.0.0.1:5000` to communicate with the IOC. Remote clients connect to the EPICS IOC, not directly to this camera-server port. Network discovery and firewall settings must allow the chosen EPICS protocol.
+**Remote EPICS control is not remote file transfer.** The earlier PyEpics sweep could issue remote acquisition commands, but the current `camera_scan.py` calculates intensity from saved files and therefore runs locally on the Pi unless full-resolution image and metadata access is provided remotely. The publisher transfers only a resized RGB display array through PVAccess.
 
 ## Current Camera Functionality
 
@@ -430,80 +221,21 @@ The metadata can include exposure time, analogue gain, digital gain, sensor time
 
 Image and metadata are retrieved from the same completed Picamera2 request.
 
-Generated acquisition files are intended to remain outside Git version control. Sweep CSV files and generated plots are stored under `data/exposure_sweeps/`, which is also excluded from Git.
+Generated acquisition files are intended to remain outside Git version control. Current scan CSV files are generated under `data/scan/` and excluded from Git. The former `data/exposure_sweeps/` directory has been retired.
 
 ## Development Progress
 
-### Milestone 1 — EPICS Communication
+| Stage | Current status |
+|---|---|
+| EPICS communication, IMX219 integration and camera control | Completed and tested |
+| CA/PVA monitoring, acquisition and requested/actual readbacks | Completed and tested |
+| Initial exposure characterization | Completed historically; original scripts retired |
+| Phoebus control and separate RGB image publisher | Demonstrated |
+| EPICS-controlled camera scanning | Exposure scan, CSV logging and PVAccess XY plotting tested |
+| Gain scanning, Stop Scan and repeated-scan reliability | Implemented; further verification needed |
+| LED recognition, advanced characterization and areaDetector | Planned |
 
-- [x] Install and configure EPICS Base, asyn, and StreamDevice
-- [x] Create and compile a conventional EPICS IOC
-- [x] Implement a Python TCP camera simulator
-- [x] Establish StreamDevice/asyn communication
-- [x] Verify local and remote Channel Access
-
-### Milestone 2 — Physical Camera and PVAccess Integration
-
-- [x] Detect and initialize the IMX219 using Picamera2
-- [x] Develop a separate Python camera server
-- [x] Implement camera-status communication
-- [x] Enable PVAccess using QSRV
-- [x] Verify status access through Channel Access and PVAccess
-
-### Milestone 3 — Camera Acquisition and Python TCP Control
-
-- [x] Develop standalone Picamera2 acquisition tests
-- [x] Capture images and matching metadata
-- [x] Test manual exposure and analogue gain
-- [x] Implement camera lifecycle and acquisition functions
-- [x] Implement the expanded Python TCP command interface
-- [x] Verify single and repeated image acquisition through TCP
-- [x] Verify exposure, gain, status, and file-path readbacks
-
-### Milestone 4 — EPICS-Controlled Acquisition and Monitoring
-
-- [x] Extend StreamDevice protocol definitions
-- [x] Add EPICS camera-control and acquisition records
-- [x] Implement the `mbbo` camera-command interface
-- [x] Verify camera lifecycle and image acquisition through Channel Access
-- [x] Implement I/O Intr camera-status monitoring
-- [x] Implement FLNK-based exposure and gain readbacks
-- [x] Implement FLNK-based automatic-exposure readback
-- [x] Implement I/O Intr image and metadata path readbacks
-- [x] Verify simultaneous monitoring of multiple PVs
-- [x] Complete expanded PVAccess interface testing
-
-
-### Milestone 5 — Initial Automation and Characterization
-
-- [x] Create a project Python virtual environment and install PyEpics
-- [x] Test PyEpics read and write access to the IOC
-- [x] Automate exposure settings and verify FLNK-triggered readbacks
-- [x] Detect new acquisitions using image and matching metadata paths
-- [x] Complete an exposure sweep and save a CSV measurement log
-- [x] Compare requested exposure with camera metadata
-- [x] Measure basic JPEG intensity statistics and plot exposure response
-- [ ] Perform controlled raw-sensor linearity, gain, and noise studies (deferred)
-
-### Milestone 6 — Phoebus Control and Image Visualization
-
-- [x] Create a Phoebus interface for camera commands, exposure, gain, and automatic exposure
-- [x] Display camera status and latest JPEG/metadata paths
-- [x] Add exposure engineering units and startup processing for setting readbacks
-- [x] Publish a saved IMX219 image as an RGB array using Python and p4p
-- [x] Display the RGB array in Phoebus using PVAccess
-- [x] Update the image display automatically when the latest acquisition path changes
-- [x] Keep the image publisher separate from the camera-control server and IOC
-
-
-### Milestone 7 — Actual Exposure/Gain Monitoring and TCP Refactoring
-
-- [x] Refactor shared TCP communication into a `TCPConnection` class
-- [x] Obtain actual exposure and analogue gain from Picamera2 frame callbacks
-- [x] Add lightweight, change-driven metadata notifications
-- [x] Separate requested-setting readbacks from actual camera values in EPICS
-- [x] Verify actual exposure/gain monitoring through Phoebus
-
+See [Implementation and Results](docs/implementation_and_results.md) for the full milestone record.
 
 ## Repository Structure
 
@@ -511,169 +243,129 @@ Generated acquisition files are intended to remain outside Git version control. 
 camera_vision_epics/
 ├── README.md
 ├── docs/
+│   ├── implementation_and_results.md
 │   ├── epics_setup.md
 │   ├── streamdevice_ioc.md
 │   ├── troubleshooting.md
 │   └── notes/
 │       ├── epics_device_integration.md
-│       └── test_picamera2_acquisition.md
+│       ├── test_picamera2_acquisition.md
+│       ├── tcp_connection_and_metadata_monitoring.md
+│       ├── automated_acquisition_and_characterization.md
+│       └── pva_image_publisher.md
 ├── acquisition/
 │   ├── camera_server_simulator.py
 │   ├── picamera2_server.py
 │   ├── pva_image_publisher.py
 │   ├── tests/
 │   │   └── test_camera_acquisition.py
-│   └── images/
-│       └── (generated image and metadata files)
+│   └── images/                 # generated JPEG/JSON; ignored
 ├── automation/
-│   └── exposure_sweep.py
-├── characterization/
-│   ├── check_exposure.py
-│   └── analyze_exposure_response.py
+│   └── camera_scan.py
 ├── data/
-│   └── exposure_sweeps/  (local CSV logs and plots; ignored by Git)
-├── .venv/  (local Python environment; ignored by Git)
+│   └── scan/                   # generated CSV; ignored
+├── .venv/                      # local virtual environment; ignored
 ├── vision/
 └── epics/
     └── streamdevice_camera/
         └── streamdevice_camera_ioc/
 ```
 
+The old `characterization/` scripts and `automation/exposure_sweep.py` are no longer active files. The `data/scan/` directory may not appear in GitHub when empty because its generated contents are ignored.
+
 ## Documentation
 
 ### Setup and Implementation
 
-- [EPICS Environment Setup](docs/epics_setup.md) — Installation and configuration of EPICS Base, asyn, and StreamDevice.
-- [StreamDevice Camera IOC](docs/streamdevice_ioc.md) — IOC architecture, Python TCP communication, camera control, record processing, I/O Intr, FLNK, and CA/PVA configuration.
-- [Troubleshooting](docs/troubleshooting.md) — Installation, compilation, networking, protocol parsing, and communication issues encountered during development.
+- [Implementation and Results](docs/implementation_and_results.md) — Chronological milestones, design decisions, experiments and verified outcomes.
+
+- [EPICS Environment Setup](docs/epics_setup.md) — Dependencies and installation.
+- [StreamDevice Camera IOC](docs/streamdevice_ioc.md) — IOC architecture, protocols, records and integration.
+- [Troubleshooting](docs/troubleshooting.md) — Recorded problems, resolutions and open issues.
 
 ### Learning Notes
 
-- [Understanding EPICS Device Integration](docs/notes/epics_device_integration.md) — EPICS device support, hardware drivers, StreamDevice, asyn, Python APIs, and areaDetector.
-- [Standalone Picamera2 Acquisition Test](docs/notes/test_picamera2_acquisition.md) — Still-image acquisition, camera configuration, metadata, exposure/gain settings, and resource management.
-- [Automated Acquisition and Initial Characterization](docs/notes/automated_acquisition_and_characterization.md) — PyEpics exposure sweeps, CSV logging, image analysis, measured results, and local/remote operation.
-- [PVAccess Image Publisher](docs/notes/pva_image_publisher.md) — Separate RGB image publisher and Phoebus configuration.
-- **Planned note:** `docs/notes/tcp_connection_and_metadata_monitoring.md` — TCP connection class, frame callback, metadata worker, and change-driven readbacks (to be written after documentation review).
+- [Understanding EPICS Device Integration](docs/notes/epics_device_integration.md).
+- [Standalone Picamera2 Acquisition Test](docs/notes/test_picamera2_acquisition.md).
+- [TCP Connection and Metadata Monitoring](docs/notes/tcp_connection_and_metadata_monitoring.md).
+- [Automated Acquisition and Initial Characterization](docs/notes/automated_acquisition_and_characterization.md) — Historical measurements; legacy scripts retired.
+- [PVAccess Image Publisher](docs/notes/pva_image_publisher.md).
+
+A separate learning note for the new sequential scan controller is planned.
 
 ## Current Limitations and Open Questions
 
 ### Communication and Monitoring
 
-- The Python camera server supports one active TCP client connection at a time.
-- Image acquisition is synchronous, so the Python server cannot process new commands until the acquisition finishes.
-- Camera commands, readbacks, and automatic notifications share the same TCP connection. Intermittent mismatches have occurred when StreamDevice expected `OK` but received a status notification such as `STATUS:IDLE`. Camera operations continued to work in the observed tests. `ExtraInput = Ignore;` is now configured globally as an experimental setting in `stream_camera.proto`; it has not been established as a fix for messages arriving before the expected response. `ReplyTimeout` and `ReadTimeout` global overrides were left commented out.
-- The output-only camera-command protocol does not wait for an acknowledgement. The Python server still sends `OK` responses, which may interfere with other messages and require further investigation.
-- Rapid intermediate camera states, particularly `ACQUIRING`, are sometimes missed by `camonitor` and `pvmonitor`. The final status was correct in the performed tests, but the cause of the missed updates remains unknown.
-- Automatic status-description updates were postponed after parsing and timeout issues. The readback remains passive because automatic updates are not essential for the current implementation.
-- The status PV initially assumes `CLOSED`, based on the normal camera-server startup behavior. Synchronization after reconnection has not been fully tested.
-- Camera status is maintained by the Python application rather than measured independently from the hardware.
-- Basic error handling is implemented, but more extensive connection recovery, failure reporting, and sensor-parameter validation remain untested.
+- The camera server accepts one active IOC TCP connection. Command responses and unsolicited status, path and applied-setting notifications share that connection. The TCP lock prevents overlapping writes but does not guarantee StreamDevice message routing or response ordering.
+- `ExtraInput = Ignore;` is enabled experimentally in `stream_camera.proto`; it has not been proven to resolve unsolicited-message mismatches. Global `ReplyTimeout` and `ReadTimeout` overrides remain commented out.
+- The output-only camera-command protocol does not consume Python's `OK` response. Brief intermediate states such as `ACQUIRING` can be missed by CA/PVA monitors. Status-description updates remain passive.
+- Actual exposure/gain PVs can retain their last values after streaming stops; initial synchronization, reconnection and error recovery need further testing.
 
-### Acquisition and Automation
+### Scanning and Data
 
-- `CAM:ExposureRB` and `CAM:GainRB` represent requested settings; `CAM:GetExposure` and `CAM:GetGain` report camera-applied values from completed-frame metadata while streaming. Actual-value PVs can retain stale values after streaming stops; validity indication is not yet implemented. The saved acquisition metadata remains the source for values associated with each particular captured image.
-- The existing `automation/exposure_sweep.py` was written against the former `CAM:GetExposure` requested-value readback and must be updated to use `CAM:ExposureRB` before relying on it with the renamed PVs.
-- The exposure/gain notification worker and command loop share a TCP connection; a lock prevents overlapping writes but does not guarantee command-response ordering.
-- The automation detects acquisition completion when the latest image-path PV changes. Additional handling may be needed if a notification is missed or the server restarts.
-- Images and metadata are saved on the Raspberry Pi. The EPICS PVs provide their file paths, not the file contents.
-- The exposure-sweep CSV records absolute Raspberry Pi file paths. Remote analysis requires access to the files and appropriate path handling. Currently the characterization scripts run on the Raspberry Pi, while exposure-sweep automation can run remotely through EPICS. A future remote-capable characterization workflow could retrieve the necessary full-resolution image and metadata files without manual transfers.
+- The sequential scan controller reads saved JPEG/JSON files locally on the Pi. It does not yet provide an in-memory image-measurement mode or remote full-resolution file access.
+- Exposure scanning, waveform publication and Phoebus XY plotting were tested. Gain scanning, Stop Scan and repeated scans require further verification. The current scan arrays support up to 100 points.
+- `SDIS` blocks normal setter processing during scan mode but does not provide strict write access control; another client could still write scan-specific setters. Automatic exposure is disabled by the scan program, but its setter is not database-interlocked.
+- Waveform arrays use `NELM=100` and report valid lengths via `NORD`. In observed tests, `caget` displayed trailing zeros while `pvget` returned valid-length data. Explicit `pva://` links in the Phoebus XY Plot eliminated an unwanted origin point. Phoebus display responsiveness needs investigation.
+- Generated JPEG/JSON and scan CSV files are intentionally excluded from Git and were cleared after testing. The scan program's CSV paths refer to files on the Pi.
 
-### Image Analysis and Characterization
+### Characterization and Image Display
 
-- Images are saved as processed JPEG files rather than raw sensor data.
-- The initial exposure-response measurements used processed JPEGs and scenes without fully controlled illumination. The results demonstrate the measurement workflow but do not establish the intrinsic linearity or noise performance of the IMX219.
-- A resized RGB image is available in Phoebus through the separate p4p publisher. Full-resolution image transfer, live video, and standard NTNDArray-based transport have not been implemented.
-- The image publisher checks the latest-image-path PV periodically. It can miss intermediate acquisitions if multiple new images arrive between checks, and it must run on a computer that can access the saved JPEG files.
-
-### Python Environment
-
-- The project uses a virtual environment created with `--system-site-packages` to access the Raspberry Pi camera libraries. This provides some dependency separation but is not fully isolated from system-installed packages.
+- Mean intensity is calculated from processed 8-bit grayscale JPEGs, not raw sensor data. Controlled sensor linearity, noise, ROI and gain characterization remain future work.
+- The earlier standalone characterization scripts were retired; their historical results remain documented and recoverable from Git.
+- The separate image publisher provides a reduced-resolution RGB array, not live video or full-resolution NTNDArray transport. Periodic path checking can miss intermediate acquisitions.
+- The project virtual environment uses `--system-site-packages` to access camera libraries and is not fully isolated.
 
 ## Development Roadmap
 
-### Phase 1 — EPICS Communication
+### Phase 1–5 — EPICS Integration, Acquisition, Characterization and Phoebus
 
-- [x] Establish StreamDevice/asyn communication
-- [x] Implement and test the simulated camera service
-- [x] Verify Channel Access and PVAccess
+- [x] Establish CA/PVA and StreamDevice/asyn communication.
+- [x] Integrate Picamera2, still acquisition and matching metadata.
+- [x] Complete initial historical JPEG characterization.
+- [x] Add Phoebus controls and separate PVAccess RGB image display.
 
-### Phase 2 — Camera Integration and Python Acquisition
+### Phase 6 — Actual Camera-Setting Readbacks
 
-- [x] Integrate Picamera2 and the physical IMX219
-- [x] Implement camera lifecycle management
-- [x] Implement still-image acquisition and metadata saving
-- [x] Implement manual and automatic exposure settings
-- [x] Test the Python TCP camera-control interface
+- [x] Refactor shared TCP communication and implement metadata monitoring.
+- [x] Distinguish requested and actual exposure/gain PVs.
 
-### Phase 3 — EPICS-Controlled Acquisition and Monitoring
+### Phase 7 — EPICS-Controlled Camera Scans (Current)
 
-- [x] Extend `stream_camera.proto` with camera commands
-- [x] Add camera-control and acquisition PVs to `camera.db`
-- [x] Verify camera operations through Channel Access
-- [x] Implement I/O Intr status and acquisition-path updates
-- [x] Implement FLNK-based parameter readbacks
-- [x] Complete PVAccess testing for the expanded interface
+- [x] Implement scan soft PVs, dedicated exposure/gain setters and `SDIS` interlocks.
+- [x] Implement sequential scan controller and saved-image mean-intensity analysis.
+- [x] Verify exposure scanning and live waveform plotting through PVAccess.
+- [ ] Test gain scans, Stop Scan, repeated scans and Phoebus performance.
+- [ ] Consider an in-memory acquisition/measurement mode.
 
-### Phase 4 — Initial Automation and JPEG Characterization
+### Phase 8 — LED Recognition
 
-- [x] Develop and test an automated exposure-sweep workflow
-- [x] Verify applied exposure times using saved frame metadata
-- [x] Complete initial processed-JPEG brightness-response analysis
-
-### Phase 5 — Phoebus Control and Image Visualization
-
-- [x] Develop a Phoebus camera-control interface
-- [x] Display camera status, settings, and acquisition paths
-- [x] Display acquired RGB images using a separate Python PVAccess publisher
-- [x] Automatically update the displayed image after acquisition
-
-### Phase 6 — Actual Camera-Setting Readbacks (Completed)
-
-- [x] Separate requested-setting and actual-value exposure/gain PVs
-- [x] Refactor TCP connection handling and monitor frame metadata
-- [x] Verify actual-value updates through Phoebus
-
-### Phase 7 — EPICS-Controlled Exposure Scans (Next)
-
-- [ ] Add scan configuration and control soft records to the existing `camera.db`
-- [ ] Use separate Scan Enable and Start Scan controls, with Stop Scan support
-- [ ] Disable normal camera setter processing during scan mode using database-level interlocks
-- [ ] Add `CAM:ScanSetExposure` for sweep-controlled exposure changes
-- [ ] Adapt PyEpics automation to respond to scan requests and publish status, progress, exposure and intensity arrays
-- [ ] Display exposure versus measured image intensity in a live Phoebus XY Plot
-- [ ] Investigate an in-memory measurement mode without saving each image, after the saved-image scan works
-
-### Phase 8 — LED Recognition (Planned)
-
-- [ ] Investigate LED recognition using camera images
-- [ ] Define the experiment and implementation approach
+- [ ] Define and test LED recognition using acquired images.
 
 ### Phase 9 — Hand-Gesture Recognition
 
-- [ ] Explore hand-gesture detection and related image processing
+- [ ] Explore hand-gesture detection and image processing.
 
 ### Phase 10 — Hardware Monitoring and Alarms
 
-- [ ] Integrate electronic components and EPICS monitoring/alarm functionality
+- [ ] Integrate electronic components and EPICS alarm monitoring.
 
 ### Phase 11 — Advanced Sensor Characterization (Deferred)
 
-- [ ] Perform controlled quantitative exposure and gain characterization
-- [ ] Investigate sensor noise and image uniformity
-- [ ] Acquire and analyze raw sensor data
+- [ ] Design new offline characterization tools for controlled exposure/gain response, ROI, uniformity and noise.
+- [ ] Investigate raw sensor data and suitable analysis methods.
 
 ### Phase 12 — areaDetector
 
-- [ ] Set up areaDetector
-- [ ] Investigate IMX219-compatible driver integration
-- [ ] Explore NDArray image transport and processing plugins
-- [ ] Compare conventional StreamDevice and areaDetector approaches
+- [ ] Investigate IMX219 driver integration, NDArray transport and plugins.
+- [ ] Compare the conventional IOC with areaDetector.
 
 ## Development and Documentation Approach
 
 The project is developed incrementally, beginning with standalone hardware and software tests before integrating functionality into EPICS.
 
-Working implementations are tested and committed to GitHub. Planned scan functionality is not yet implemented. The refactored camera server and actual-value readbacks were tested in the existing Phoebus workflow.
+Working implementations are tested and committed to GitHub; detailed milestones and results are maintained in [Implementation and Results](docs/implementation_and_results.md). The sequential scan controller and exposure scan have now been tested; gain scanning and other remaining checks are explicitly marked as pending.
 
 Implementation guides document reproducible configurations and design decisions, learning notes explain underlying concepts, and troubleshooting records problems encountered during development.
 
