@@ -1129,7 +1129,7 @@ The EPICS interface now distinguishes requested and camera-reported values:
 | `CAM:GetExposure` | Latest camera-reported exposure; I/O Intr notification |
 | `CAM:GetGain` | Latest camera-reported gain; I/O Intr notification |
 
-The corresponding requested-value TCP queries are now `EXPOSURE_RB?` and `GAIN_RB?`, rather than `EXPOSURE?` and `GAIN?`. Historical examples in earlier sections retain the original names to document the problems as encountered. The existing `automation/exposure_sweep.py` must be reviewed and updated to use `CAM:ExposureRB` before its next run; the former `CAM:GetExposure` no longer has requested-readback semantics.
+The corresponding requested-value TCP queries are now `EXPOSURE_RB?` and `GAIN_RB?`, rather than `EXPOSURE?` and `GAIN?`. Historical examples in earlier sections retain the original names to document the problems as encountered. The former `automation/exposure_sweep.py` used the old requested-readback name. It has since been replaced by `automation/camera_scan.py`, which uses `CAM:ExposureRB` for requested-setting verification; `CAM:GetExposure` reports frame metadata.
 
 **Verification and remaining limitations**
 
@@ -1139,6 +1139,98 @@ The refactored Python server passed a syntax check and produced expected results
 
 When the camera is not producing frames, actual-value PVs may retain their last reported values. Stale-value indication and reconnection synchronization remain future improvements. For implementation details, see [StreamDevice Camera IOC](streamdevice_ioc.md) and [TCP Connection and Metadata Monitoring](notes/tcp_connection_and_metadata_monitoring.md).
 
+## 46. `SDIS CP` Triggered Unintended Setter Processing at IOC Startup — 27 October 2026
+
+**Symptom**
+
+After adding scan-mode interlocks, IOC initialization produced StreamDevice response mismatches for the ordinary exposure and gain setters:
+
+```text
+CAM_PORT CAM:SetGain: Input "ERROR: Analogue gain must be a finite, p..."
+CAM_PORT CAM:SetGain: got "ERROR: Ana..." where "OK" was expected
+CAM_PORT CAM:SetExposure: Input "ERROR: Exposure time must be positive..."
+CAM_PORT CAM:SetExposure: got "ERROR: Exp..." where "OK" was expected
+```
+
+The camera server rejected invalid zero-valued settings. Both output records were confirmed to have `PINI = NO` and `SCAN = Passive`, so neither startup PINI processing nor periodic scanning explained the writes.
+
+**Cause and tested correction**
+
+The new `SDIS` links used the `CP` modifier, for example:
+
+```text
+field(SDIS, "$(P)$(R)ScanEnable CP")
+field(DISV, "1")
+```
+
+`CP` can request processing when the linked scan-enable PV posts a monitor event. This is undesirable for camera output records whose default values should not be sent at IOC startup. Removing `CP` from the `SDIS` links on `SetExposure`, `SetGain`, `ScanSetExposure`, and `ScanSetGain` eliminated the observed startup errors:
+
+```text
+field(SDIS, "$(P)$(R)ScanEnable")
+```
+
+Keep `DISV = 1` on ordinary setters (disabled when scan mode is enabled) and `DISV = 0` on scan-specific setters (disabled when scan mode is off). The resulting interlocks were checked through Phoebus and behaved as expected in the reported tests.
+
+**Limitation:** Record disabling prevents normal processing; it does not provide per-client access security or guarantee that a disabled record's `VAL` cannot be written.
+
+## 47. Scan Waveform Returned 100 Values Despite Three Valid Points
+
+**Symptom**
+
+Writing three exposure values using:
+
+```bash
+caput -a CAM:ScanExposure 3 5000 10000 20000
+```
+
+was followed by `caget CAM:ScanExposure` displaying 100 values: the three supplied numbers and 97 zeros. The same behavior occurred with `CAM:ScanIntensity`.
+
+**Investigation and outcome**
+
+The waveform records have `FTVL = DOUBLE` and `NELM = 100`, allowing up to 100 scan points. The observed `NORD` fields correctly reported `3` after the three-element writes. Thus the IOC tracked the number of valid values, even though the default Channel Access client display included the full allocated array capacity.
+
+```bash
+caget CAM:ScanExposure.NORD
+caget CAM:ScanIntensity.NORD
+caget -# 3 CAM:ScanExposure
+```
+
+Do not remove `NELM` to solve this display issue; it sets the maximum waveform capacity. The scan program writes the growing numerical arrays, and `NORD` indicates the valid element count.
+
+## 48. Phoebus XY Plot Included an Unwanted `(0, 0)` Point
+
+**Symptom**
+
+The XY Plot displayed the measured exposure–intensity points but also an extra point at the origin. Both waveform `NORD` fields reflected the expected valid measurement count. A later five-point exposure scan showed:
+
+```text
+pvget CAM:ScanExposure
+[982,1984,2986,3988,4990]
+```
+
+while `caget CAM:ScanExposure` displayed those five values followed by zeros up to the 100-element waveform capacity.
+
+**Tested workaround**
+
+In the Phoebus XY Plot trace configuration, explicitly select PVAccess for both numerical waveforms:
+
+```text
+X PV: pva://CAM:ScanExposure
+Y PV: pva://CAM:ScanIntensity
+```
+
+The operator confirmed that the unwanted origin point disappeared. For gain scans, use `pva://CAM:ScanGain` as the X PV and the same intensity waveform as Y. The trace type can be set to `Line` for a conventional characterization curve.
+
+**Interpretation:** The observed difference between the CA and PVA array representations is consistent with Phoebus receiving trailing unused zeros through the original configuration. The tests establish that switching the plot to PVA fixed the visible problem; they do not establish that every CA client or every Phoebus configuration necessarily behaves this way.
+
+## 49. Phoebus Display Responsiveness During Plot Testing
+
+**Observation**
+
+During scan-plot testing, Phoebus appeared unusually slow, and part of the plotted curve was temporarily not visible. No definitive cause was established. The user tested a simplified display to help isolate the behavior, but no performance measurements or confirmed resolution were recorded.
+
+**Status:** Keep this as an open observation. If it recurs, compare a minimal XY Plot with the full camera dashboard, and distinguish plot redraw delays from delayed or missing PV updates before changing the IOC or scan program.
+
 ---
 
-**Documentation status (26 October 2026):** EPICS-controlled acquisition, expanded PVAccess testing, initial PyEpics automation, JPEG characterization, and Phoebus RGB image display have been demonstrated. The refactored TCP manager and actual exposure/gain monitoring were tested through Netcat and Phoebus. Earlier investigations remain historical records. Shared-port communication robustness, stale actual-value indication, and rapid status-event visibility remain open limitations. The existing exposure-sweep script needs its requested-readback PV reference updated before reuse.
+**Documentation status (27 October 2026):** The EPICS-controlled exposure scan, JPEG acquisition, mean-intensity calculation, CSV logging, scan-mode database interlocks, and numerical waveform publication have been demonstrated. The Phoebus XY Plot displayed the intended points after switching both trace PVs to PVAccess. `automation/camera_scan.py` replaces the earlier exposure-sweep script, and the legacy characterization scripts have been removed from the active repository; their earlier findings remain documented historically. Gain scanning, Stop Scan behavior, repeated-scan reliability, Phoebus responsiveness, shared-port message ordering, and reconnect/error recovery still require further verification.
