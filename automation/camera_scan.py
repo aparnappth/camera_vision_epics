@@ -21,6 +21,9 @@ PV_EXPOSURE_RB = epics.PV("CAM:ExposureRB")
 PV_GAIN_RB = epics.PV("CAM:GainRB")
 PV_IMAGE_PATH = epics.PV("CAM:GetLatestImagePath")
 PV_METADATA_PATH = epics.PV("CAM:GetLatestMetadataPath")
+PV_ACTUAL_EXPOSURE = epics.PV("CAM:GetExposure")
+PV_ACTUAL_GAIN = epics.PV("CAM:GetGain")
+
 
 # Scan configuration and commands
 PV_SCAN_ENABLE = epics.PV("CAM:ScanEnable")
@@ -150,10 +153,18 @@ def run_scan():
             put(PV_SET_AUTO_EXPOSURE, 0)
             wait_for_readback(PV_GET_AUTO_EXPOSURE, 0)
         scan_type, values = scan_settings()
+        
         x_pv = PV_SCAN_SET_EXPOSURE if scan_type == "Exposure" else PV_SCAN_SET_GAIN
         rb_pv = PV_EXPOSURE_RB if scan_type == "Exposure" else PV_GAIN_RB
-        tolerance = 0 if scan_type == "Exposure" else 0.001
 
+        actual_pv = (
+            PV_ACTUAL_EXPOSURE
+            if scan_type == "Exposure"
+            else PV_ACTUAL_GAIN
+        )
+
+        tolerance = 0 if scan_type == "Exposure" else 0.001
+        actual_tolerance = 100 if scan_type == "Exposure" else 0.05
         # Replace the previous scan's plot with a single non-plottable point.
         # New measurements replace this placeholder with real arrays.
         put(PV_SCAN_EXPOSURE, np.array([np.nan]))
@@ -176,9 +187,39 @@ def run_scan():
             for requested in values:
                 if PV_STOP_SCAN.get() == 1 or PV_SCAN_ENABLE.get() != 1:
                     raise InterruptedError("Scan stopped or disabled")
+                    
+                if PV_STATUS.get(as_string=True) != "STREAMING":
+                    put(PV_CAMERA_COMMAND, "Start")
+
+                    start = time.monotonic()
+
+                    while PV_STATUS.get(as_string=True) != "STREAMING":
+                        if time.monotonic() - start > TIMEOUT:
+                            raise TimeoutError("Camera did not start streaming")
+
+                        time.sleep(POLL_INTERVAL)
+
                 put(x_pv, requested)
+
+                # Wait for the requested setting to be accepted
                 readback = wait_for_readback(rb_pv, requested, tolerance)
+
+                # Wait for the camera-reported setting to reach the target
+                actual_readback = wait_for_readback(
+                    actual_pv,
+                    requested,
+                    actual_tolerance
+                )
+
+                print(
+                    f"Requested: {requested:g}, "
+                    f"Camera reported: {actual_readback:g}"
+                )
+
+                # Acquire only after the actual setting is confirmed
                 image_path, metadata_path = acquire_image()
+
+                
                 actual, intensity = measure_image(image_path, metadata_path, scan_type)
                 x_values.append(actual)
                 intensities.append(intensity)
