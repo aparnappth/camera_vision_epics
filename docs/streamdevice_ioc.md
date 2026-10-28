@@ -1,6 +1,6 @@
 # StreamDevice Camera IOC — Implementation Guide
 
-This guide documents the conventional EPICS IOC developed for the [EPICS-Controlled Camera Characterization and Vision Platform](../README.md). It covers the simulated TCP service, the conventional IOC and its CA/PVA support, standalone Picamera2 acquisition, and the expanded Python TCP camera server tested in October 2026. The expanded acquisition commands and event-driven status/file-path monitoring are integrated into the IOC and have been tested through Channel Access and PVAccess. The separate Python PVAccess image publisher and Phoebus display are also described at an architectural level. Section 23 describes the 26 October TCP refactoring and actual-value monitoring. Section 24 documents the EPICS-controlled scanning implementation tested on 27 October. Older configurations are retained as explicitly historical examples; use the later sections for current PV names and operation. Shared-port communication limitations remain documented below.
+This guide documents the conventional EPICS IOC developed for the [EPICS-Controlled Camera Characterization and Vision Platform](../README.md). It covers the simulated TCP service, the conventional IOC and its CA/PVA support, standalone Picamera2 acquisition, and the expanded Python TCP camera server tested in October 2026. The expanded acquisition commands and event-driven status/file-path monitoring are integrated into the IOC and have been tested through Channel Access and PVAccess. The separate Python PVAccess image publisher and Phoebus display are also described at an architectural level. Section 23 describes the 26 October TCP refactoring and actual-value monitoring. Section 24 documents EPICS-controlled scanning and the 28 October synchronization tests. Older configurations are retained as explicitly historical examples; use the later sections for current PV names and operation. Shared-port communication limitations remain documented below.
 
 For dependency installation, see [EPICS Environment Setup](epics_setup.md). For errors encountered during development, see [Troubleshooting](troubleshooting.md).
 
@@ -85,13 +85,17 @@ camera_vision_epics/
 │   └── notes/
 │       ├── epics_device_integration.md
 │       ├── test_picamera2_acquisition.md
-│       ├── automated_acquisition_and_characterization.md  # historical note
+│       ├── epics_camera_scanning.md
 │       ├── tcp_connection_and_metadata_monitoring.md
 │       └── pva_image_publisher.md
 ├── automation/
 │   └── camera_scan.py
 ├── data/
 │   └── scan/  # generated CSV files; ignored by Git
+├── phoebus/
+│   ├── epics_Camera_vision_main.bob
+│   ├── epics_Camera_vision_scan_exposure.bob
+│   └── epics_Camera_vision_scan_gain.bob
 └── epics/
     └── streamdevice_camera/
         └── streamdevice_camera_ioc/
@@ -1094,7 +1098,7 @@ pvget CAM:ScanExposure
 
 ### 24.5 Sequential scan workflow and outputs
 
-The current `camera_scan.py` uses persistent `epics.PV()` objects and their `.get()`/`.put()` methods. It waits for Start Scan, reads and validates the selected range, disables/verifies automatic exposure, and iterates over scan points. For each point it writes through `CAM:ScanSetExposure` or `CAM:ScanSetGain`, waits for `CAM:ExposureRB` or `CAM:GainRB`, requests `Acquire`, waits for a new JPEG path and matching JSON path, reads the saved files, computes mean 8-bit grayscale intensity, and updates the status, progress and waveform PVs. It also saves a timestamped CSV under `data/scan/`. JPEG and JSON files are stored under `acquisition/images/`.
+The current `camera_scan.py` uses persistent `epics.PV()` objects and their `.get()`/`.put()` methods. It waits for Start Scan, reads and validates the selected range, disables/verifies automatic exposure, and iterates over scan points. For each point it writes through `CAM:ScanSetExposure` or `CAM:ScanSetGain`, waits for `CAM:ExposureRB` or `CAM:GainRB`, then waits for the corresponding camera-reported `CAM:GetExposure` or `CAM:GetGain` to approach the requested setting before requesting `Acquire`, waits for a new JPEG path and matching JSON path, reads the saved files, computes mean 8-bit grayscale intensity, and updates the status, progress and waveform PVs. It also saves a timestamped CSV under `data/scan/`. JPEG and JSON files are stored under `acquisition/images/`.
 
 The scan uses a changed `CAM:GetLatestImagePath` and matching `CAM:GetLatestMetadataPath` as practical acquisition-completion indicators. The camera-command StreamDevice protocol remains output-only, so a successful PV write is not itself a completion acknowledgement. The arrays are held in IOC memory and are not a replacement for saved CSV data. The scan program currently uses a single NaN placeholder when resetting plot waveforms; this is a one-element array, not a true empty array.
 
@@ -1116,7 +1120,29 @@ The trace type was changed from Step to Line for the exposure-response plot. Pho
 
 **Tested:** scan PV definitions, numerical waveform writes, normal-versus-scan setter interlocks, a saved-JPEG exposure scan, metadata-based X values, mean-intensity publication, CSV logging and a Phoebus PVA XY Plot without the spurious origin point.
 
-**Not yet fully verified:** gain-scan execution, Stop Scan behavior, repeated-scan robustness, long scans, reconnection and mixed TCP notification reliability, performance of the Phoebus display, and a future in-memory intensity measurement mode that avoids saving each image. The old `exposure_sweep.py` and two standalone characterization scripts were removed from the active repository; their earlier experiments are documented in `implementation_and_results.md` and historical notes.
+**Verified on 28 October:** exposure and gain scan execution, Stop Scan interruption, repeated scans, and camera-setting synchronization in the tested conditions. **Remaining limitations:** long-duration stress testing, reconnection and mixed TCP notification reliability, and Phoebus performance. In-memory intensity analysis without saving each image remains an optional future extension. The old `exposure_sweep.py` and two standalone characterization scripts were removed from the active repository; their earlier experiments are documented in `implementation_and_results.md` and historical notes.
+
+### 24.8 Camera-setting synchronization and scan validation (28 October 2026)
+
+The first scan implementation verified only the *requested* setting through `CAM:ExposureRB` or `CAM:GainRB` before acquisition. Tests showed that the first image could still contain a previous applied setting (for example, an exposure of 34,990 µs instead of the requested first scan point). The requested readback confirms that the Python server accepted a setpoint; it does not establish which controls were applied to the captured frame.
+
+The scan controller now also monitors `CAM:GetExposure` or `CAM:GetGain`, which are updated from streaming frame metadata. After writing a scan setpoint and verifying its requested-value readback, it waits for the corresponding camera-reported value to approach the target. The tested provisional tolerances were 100 µs for exposure and 0.05 for gain, with a timeout. The X-axis value remains the actual setting from the *captured image's own JSON metadata*, paired with the mean grayscale intensity of that JPEG.
+
+This wait requires active streaming. During testing, `CAM:ExposureRB` reached 50,000 µs while `CAM:GetExposure` remained at 10,491 µs and `CAM:GetStatus` was `IDLE`. With no new frames, the actual-value monitor could not advance, and the scan timed out. The controller was therefore adjusted to issue `Start` when necessary and wait until `CAM:GetStatus` reports `STREAMING` before proceeding with scan settings and acquisitions.
+
+When starting scans from `IDLE`, the IOC also logged occasional `STATUS:IDLE` or `STATUS:STREAMING` lines where the exposure setter expected `OK`, or the exposure readback expected a number. Waiting for the `STREAMING` status before continuing eliminated these observed mismatches in subsequent tests. This is an empirical synchronization improvement, **not proof that all unsolicited-message ordering issues on the shared TCP connection have been solved**. The StreamDevice protocol was not changed for this fix.
+
+Exposure scans, gain scans, Stop Scan interruption, and repeated scan operation were reported working after these adjustments. Stop Scan remains a cooperative request; the operator chose not to add automatic resetting of the Stop Scan button after a scan.
+
+### 24.9 Phoebus display files
+
+The following display definitions are version-controlled under `phoebus/`:
+
+- `epics_Camera_vision_main.bob` — camera controls and entry point for scan displays.
+- `epics_Camera_vision_scan_exposure.bob` — exposure scan configuration and plot.
+- `epics_Camera_vision_scan_gain.bob` — gain scan configuration and plot.
+
+The main display provides separate exposure and gain action buttons that select the corresponding scan type and open its display. The XY plots use explicit `pva://` waveform PVs as documented above. Keep Open Display references relative so the display files remain portable.
 
 ## 25. References
 
@@ -1131,4 +1157,4 @@ The trace type was changed from Step to Line for the exposure-response plot. Pho
 
 ---
 
-**Implementation status (27 October 2026):** The refactored TCP server and actual-value readbacks remain operational. The IOC now includes scan configuration, scan-only setters, `SDIS`/`DISV` interlocks and result waveform PVs. A sequential PyEpics exposure scan with saved JPEG/JSON data, mean-intensity calculation, CSV logging and live Phoebus PVAccess plotting was tested. Gain scanning, stop behavior, repeated-run robustness, shared-port message ordering and display performance remain to be verified.
+**Implementation status (28 October 2026):** Exposure and gain scans, Stop Scan interruption, repeated scans, actual-setting verification and Phoebus scan displays have been tested. Waiting for `STREAMING` before scanning resolved the observed startup protocol mismatches in the tested conditions. Shared-port message-ordering reliability, reconnection handling and display performance remain open areas for further investigation.
