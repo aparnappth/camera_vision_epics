@@ -964,7 +964,7 @@ A successful write to the output-only `CAM:CameraCommand` record does not establ
 
 This worked in the tested exposure sweeps but is not a complete acknowledgement protocol. Missed path notifications, server restarts, and error cases require additional handling. A timeout prevents the script from waiting indefinitely. Image and metadata files remain on the Raspberry Pi even if the automation runs on another computer.
 
-For the implementation and analysis workflow, see [Automated Acquisition and Characterization](notes/automated_acquisition_and_characterization.md).
+For the current scanning workflow, see [EPICS Camera Scanning](notes/epics_camera_scanning.md). Historical characterization results are retained in [Implementation and Results](implementation_and_results.md).
 
 ## 37. Matplotlib Installation Warning in the Project Environment
 
@@ -1231,6 +1231,80 @@ During scan-plot testing, Phoebus appeared unusually slow, and part of the plott
 
 **Status:** Keep this as an open observation. If it recurs, compare a minimal XY Plot with the full camera dashboard, and distinguish plot redraw delays from delayed or missing PV updates before changing the IOC or scan program.
 
+## 50. First Scan Measurement Used the Previous Camera Setting — 28 October 2026
+
+**Symptom**
+
+The scan completed, but the first exposure measurement was inconsistent with the requested starting point. In one four-point test, the reported actual exposure values were approximately `34990`, `9999`, `13326`, and `16653` microseconds. A gain scan also initially reported a value associated with the preceding setting.
+
+**Investigation**
+
+The scan originally waited for `CAM:ExposureRB` or `CAM:GainRB` after writing `CAM:ScanSetExposure` or `CAM:ScanSetGain`, then immediately requested acquisition. These requested-value readbacks confirm the settings held by the Python camera server; they do not prove that a completed camera frame has used the new setting. The scan already took its plotted X value from the acquired image's JSON metadata, so the plot was reporting the acquired frame rather than inventing an incorrect X value.
+
+**Change and outcome**
+
+The scan program now also waits for the corresponding camera-reported PV (`CAM:GetExposure` or `CAM:GetGain`) to approach the requested value before acquiring. The initial test tolerances were 100 microseconds for exposure and 0.05 for gain, with a 10-second timeout. The acquired image's own metadata remains the authoritative X value for that measurement. Exposure and gain scans subsequently worked in the reported tests.
+
+**Limitation:** The live actual-value PV is updated periodically from completed-frame metadata and can be stale; Picamera2 may also have queued frames. This check improves synchronization but is not a general guarantee of frame freshness or exact requested-versus-applied equality.
+
+## 51. Actual-Exposure Wait Timed Out When Camera Was IDLE
+
+**Symptom**
+
+```text
+Scan failed: CAM:GetExposure did not reach 50000
+```
+
+A diagnostic check showed:
+
+```text
+CAM:ScanSetExposure  50000
+CAM:ExposureRB       50000
+CAM:GetExposure      10491
+CAM:GetStatus        IDLE
+```
+
+**Cause**
+
+The requested exposure had been accepted, but the camera was not streaming. `CAM:GetExposure` is updated from completed-frame metadata, so in `IDLE` it could retain an older value rather than advance toward the new request. Waiting for the actual PV before issuing an acquisition could therefore time out.
+
+**Tested correction**
+
+The scan controller starts the camera if it is not already streaming, and waits until `CAM:GetStatus` reports `STREAMING` before proceeding to the setting-verification and acquisition loop. This preserves the sequential PyEpics design without introducing another thread or TCP connection. Scanning subsequently worked in the observed tests.
+
+**Important:** A status check is a synchronization step, not a guarantee that all pending TCP messages have been dispatched or that every queued frame is fresh. Retain a timeout and Stop Scan checks where appropriate.
+
+## 52. Status Notifications Mismatched Scan Responses During IDLE-to-STREAMING Startup
+
+**Symptom**
+
+Although a scan could finish successfully, the IOC logged errors such as:
+
+```text
+CAM_PORT CAM:ScanSetExposure: Input "STATUS:IDLE"
+CAM_PORT CAM:ScanSetExposure: got "STATUS:IDL..." where "OK" was expected
+CAM_PORT CAM:ExposureRB: Input "STATUS:STREAMING" does not match format "%d"
+CAM_PORT CAM:ScanSetExposure: got "STATUS:STR..." where "OK" was expected
+```
+
+**Investigation**
+
+The Python server sends unsolicited `STATUS:` notifications over the same asyn TCP connection used for setter acknowledgements and numeric readbacks. Targeted testing found the errors when scans were initiated from `IDLE`, but not during the tested steady-streaming scans. This was consistent with status-transition notifications overlapping subsequent request-response transactions; the exact StreamDevice message-dispatch sequence was not instrumented.
+
+**Tested correction**
+
+After issuing `Start`, `camera_scan.py` now waits for `CAM:GetStatus` to report `STREAMING` before sending scan setpoints. The operator confirmed that the observed mismatch errors disappeared with this change. No change to `stream_camera.proto`, its `in "OK"` acknowledgements, or the single TCP connection was needed for this test.
+
+**Remaining limitation:** The successful test does not prove that unsolicited notifications and command responses are always routed correctly under all timing, reconnect, or error conditions. `ExtraInput = Ignore;` is not a general-purpose notification router, and the output-only `cameraCommand` protocol still has an acknowledgement inconsistency with the Python server.
+
+## 53. Scan and Phoebus Verification — 28 October 2026
+
+Both exposure and gain scan modes were exercised successfully, including the corresponding Phoebus scan displays. Stop Scan was observed to interrupt the scan, and repeated scans were reported to work. The Stop Scan PV/button is not automatically reset after an interrupted scan; automatic reset was deliberately not added.
+
+The repository now contains three Phoebus `.bob` displays under `phoebus/`: `epics_Camera_vision_main.bob`, `epics_Camera_vision_scan_exposure.bob`, and `epics_Camera_vision_scan_gain.bob`. The main display provides separate exposure/gain actions that select the scan type and open the corresponding display. These UI changes do not require additional camera TCP commands.
+
+These checks establish the behavior observed in the tested workflows, not exhaustive performance, disconnect/reconnect, or long-duration reliability.
+
 ---
 
-**Documentation status (27 October 2026):** The EPICS-controlled exposure scan, JPEG acquisition, mean-intensity calculation, CSV logging, scan-mode database interlocks, and numerical waveform publication have been demonstrated. The Phoebus XY Plot displayed the intended points after switching both trace PVs to PVAccess. `automation/camera_scan.py` replaces the earlier exposure-sweep script, and the legacy characterization scripts have been removed from the active repository; their earlier findings remain documented historically. Gain scanning, Stop Scan behavior, repeated-scan reliability, Phoebus responsiveness, shared-port message ordering, and reconnect/error recovery still require further verification.
+**Documentation status (28 October 2026):** Exposure and gain scans, scan-setting synchronization, saved JPEG/JSON acquisition, intensity calculation, CSV logging, live PVAccess XY plotting, Stop Scan interruption, and repeated scan operation have been demonstrated. Waiting for `STREAMING` resolved the observed startup response mismatches in the reported tests. The general single-port notification/acknowledgement ordering problem, stale-value indication, reconnect/error recovery, and Phoebus performance under broader conditions remain open areas for investigation.
