@@ -1,11 +1,11 @@
 # Implementation and Results
 
 **EPICS-Controlled Camera Characterization and Vision Platform**  
-**Development record through 27 October 2026**
+**Development record through 28 October 2026**
 
 This document records the implementation stages, design decisions, tests and observed results of the project. It complements the [project overview](../README.md), the [StreamDevice IOC implementation guide](streamdevice_ioc.md), and the [troubleshooting record](troubleshooting.md). Earlier experiments are retained as historical results even where their scripts have since been retired.
 
-The currently active scan controller is `automation/camera_scan.py`. Exposure scans and live plotting have been demonstrated; gain scans, Stop Scan and repeated-scan reliability require further verification.
+The currently active scan controller is `automation/camera_scan.py`. Exposure and gain scans, Stop Scan, repeated scanning, and live Phoebus plotting have been exercised successfully. Broader communication and display-performance testing remains open.
 
 ---
 
@@ -200,7 +200,7 @@ Exposure and gain have separate start/end parameter PVs because they use differe
 
 For each completed point, the X-axis value comes from the matching captured frame's metadata, and the Y-axis value is the mean intensity of its saved JPEG. The IOC stores the growing scan arrays in `waveform` records (`FTVL=DOUBLE`, `NELM=100`), with `NORD` identifying the number of valid values. In Phoebus, explicit `pva://` X and Y PVs eliminated an unwanted `(0, 0)` point observed with Channel Access waveform display.
 
-**Verified:** Exposure scan execution, saved-image acquisition, intensity calculation, waveform publication, database interlocks and a Phoebus XY plot. **Not yet fully verified:** Gain scanning, Stop Scan behavior, repeated-scan reliability, performance of the complete Phoebus display, and the proposed in-memory acquisition mode.
+**Verified on 27 October:** Exposure scan execution, saved-image acquisition, intensity calculation, waveform publication, database interlocks and a Phoebus XY plot. Gain scanning and additional control tests were completed on 28 October (Section 14).
 
 ### 13.1 Scan verification details and remaining work
 
@@ -212,4 +212,39 @@ A test write of three waveform elements resulted in `NORD=3` for both X and Y ar
 
 The current saved-image scan requires access to the JPEG and JSON files stored on the Raspberry Pi. The earlier standalone characterization scripts and the `data/exposure_sweeps/` directory were retired during repository cleanup; the old analysis results above remain historical evidence, not a description of active scripts. Generated scan CSV files are now stored under `data/scan/` and excluded from Git.
 
-**Further tests:** gain scanning, Stop Scan handling, repeated scan requests, synchronization after disconnections, and Phoebus display performance. In-memory acquisition and rigorous sensor characterization are deferred.
+**Follow-up:** The scan behavior was tested further on 28 October (Section 14). Broader disconnection recovery and Phoebus performance characterization remain open.
+
+### 14. Scan Synchronization, Gain Scanning and Phoebus Displays (28 October 2026)
+
+Exposure and gain scans were tested through the current sequential `automation/camera_scan.py` controller. Both scan types produced saved JPEG/JSON pairs, mean-intensity results, CSV logs, and growing waveform arrays for Phoebus XY plots. Stop Scan interrupted an active scan, and repeated scan operation was also tested. The Stop Scan command PV is not automatically reset after interruption; this behavior was deliberately left unchanged.
+
+#### 14.1 Requested versus camera-applied settings
+
+Early scan results showed that the first acquired frame could retain the setting from a preceding operation. A requested-setting readback (`CAM:ExposureRB` or `CAM:GainRB`) confirms the value stored by the Python camera server but does not prove that the camera has applied it to a completed frame. The scan controller was updated to wait for `CAM:GetExposure` or `CAM:GetGain` to approach the requested setting before acquisition. Provisional tolerances of 100 microseconds for exposure and 0.05 for analogue gain were used during testing. The saved image's matching JSON metadata remains the source of the actual X-axis value in the scan results.
+
+An initial test timed out waiting for `CAM:GetExposure` to reach 50000 microseconds. Investigation showed that `CAM:ExposureRB` reported 50000, but `CAM:GetExposure` retained an older value and `CAM:GetStatus` was `IDLE`. The actual-value PVs depend on frame metadata and do not refresh without streaming frames. The controller therefore starts streaming when necessary and waits for the IOC status to report `STREAMING` before proceeding with setting verification and acquisition.
+
+#### 14.2 Observed shared-TCP message mismatches
+
+When scans began from `IDLE`, StreamDevice sometimes received `STATUS:IDLE` or `STATUS:STREAMING` where a setter expected `OK`, or where a requested-value readback expected a number. Tests found that the errors occurred during the transition into streaming, not during the checked steady-streaming scan operations. Waiting for `CAM:GetStatus` to report `STREAMING` before continuing resolved the observed errors in subsequent tests. No additional TCP connection or change to `stream_camera.proto` was introduced. This is a tested synchronization improvement, not proof that all shared-port notification ordering issues are resolved.
+
+#### 14.3 Phoebus scan interface
+
+Three Phoebus `.bob` displays were added to the repository under `phoebus/`:
+
+- `epics_Camera_vision_main.bob` — main camera-control display.
+- `epics_Camera_vision_scan_exposure.bob` — exposure-scan controls and plot.
+- `epics_Camera_vision_scan_gain.bob` — gain-scan controls and plot.
+
+The main display provides separate actions for exposure and gain scans, selecting the corresponding scan type and opening the relevant display. The XY plots use `pva://CAM:ScanExposure` or `pva://CAM:ScanGain` for X and `pva://CAM:ScanIntensity` for Y. The three display files were committed to GitHub and synchronized with the Raspberry Pi repository.
+
+**Result:** Exposure and gain scanning, frame-setting verification, cooperative stopping, repeated scan operation, and the separate Phoebus scan displays were tested successfully. Further work may investigate resilience under communication failures and the previously observed Phoebus responsiveness issue.
+
+### Possible Future Extensions
+
+The following are exploratory options rather than scheduled implementation work:
+
+- Perform in-memory image acquisition and intensity analysis without saving every frame.
+- Explore continuous image streaming through EPICS instead of displaying only the latest saved image.
+- Extend image processing and analysis beyond image-wide mean grayscale intensity.
+- Improve communication recovery and synchronization across IOC or camera-server disconnects.
