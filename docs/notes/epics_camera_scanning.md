@@ -2,7 +2,7 @@
 
 **Project:** EPICS-Controlled Camera Characterization and Vision Platform  
 **Implementation:** `automation/camera_scan.py`  
-**Updated:** 27 October 2026
+**Updated:** 28 October 2026
 
 ## 1. Purpose and scope
 
@@ -10,7 +10,7 @@
 
 The script does **not** communicate with Picamera2 directly. It communicates with the IOC using EPICS Channel Access. The camera server continues to own camera hardware and file acquisition.
 
-**Verified:** an exposure scan, file acquisition, intensity reporting, waveform updates, and a Phoebus XY plot. **Still to verify thoroughly:** gain scanning, Stop Scan, repeated scans, reconnection/error recovery, and Phoebus responsiveness.
+**Verified in the exercised tests:** exposure and gain scans, cooperative Stop Scan, repeated scans, JPEG/JSON acquisition, intensity reporting, waveform updates, and Phoebus plotting. **Further robustness work:** disconnect/reconnect recovery, mixed TCP-message ordering under broader conditions, and Phoebus responsiveness.
 
 ## 2. Data and command flow
 
@@ -47,6 +47,8 @@ The script creates named PV objects once:
 PV_SCAN_ENABLE = epics.PV("CAM:ScanEnable")
 PV_SCAN_SET_EXPOSURE = epics.PV("CAM:ScanSetExposure")
 PV_EXPOSURE_RB = epics.PV("CAM:ExposureRB")
+PV_ACTUAL_EXPOSURE = epics.PV("CAM:GetExposure")
+PV_ACTUAL_GAIN = epics.PV("CAM:GetGain")
 ```
 
 It then reads and writes them with `.get()` and `.put()`:
@@ -56,7 +58,7 @@ if PV_SCAN_ENABLE.get() == 1:
     PV_SCAN_SET_EXPOSURE.put(20000, wait=True)
 ```
 
-This is equivalent in purpose to repeated `epics.caget()` and `epics.caput()` calls, but explicit objects make the scan code easier to follow. `wait=True` waits for the Channel Access put operation to complete; it does **not** by itself prove that the camera applied the requested setting. The script separately checks the requested-value readback and then uses the captured frame's metadata for the actual measurement.
+This is equivalent in purpose to repeated `epics.caget()` and `epics.caput()` calls, but explicit objects make the scan code easier to follow. `wait=True` waits for the Channel Access put operation to complete; it does **not** by itself prove that the camera applied the requested setting. The script separately checks the requested-value readback, waits for the camera-reported setting from streaming-frame metadata, and then uses the captured frame's own metadata for the plotted X value.
 
 The small `put(pv, value)` helper checks the return status and raises an exception on a failed write.
 
@@ -136,15 +138,35 @@ No separate fixed-gain PV is required for an exposure scan; the camera uses its 
 
 ## 7. Acquisition and measurement
 
+### Camera-state synchronization before the scan
+
+The actual exposure/gain readbacks are derived from completed frames while the camera is streaming. When the camera is `IDLE`, those PVs can retain an old value. During testing, the scan timed out waiting for `CAM:GetExposure` to reach 50000 µs while `CAM:GetStatus` was `IDLE` and the requested readback had already reached 50000 µs.
+
+The updated scan workflow starts streaming if needed and **waits until `CAM:GetStatus` reports `STREAMING`** before setting scan points. The status check has a timeout; sending `Start` alone is not treated as proof that the IOC has observed the transition. In the exercised tests this also eliminated `STATUS:IDLE` / `STATUS:STREAMING` lines being matched against setter `OK` replies or numeric readbacks during scan startup. It does not establish a general fix for all shared-port message ordering.
+
+### Requested setting versus applied setting
+
+An early scan captured a first exposure point at approximately 34990 µs when a different starting exposure was requested. Waiting only for `CAM:ExposureRB` confirms the Python server's requested setting, not that a camera frame has used it. The updated program waits for the live `CAM:GetExposure` or `CAM:GetGain` readback to approach the requested setting before acquisition:
+
+```python
+put(x_pv, requested)
+readback = wait_for_readback(rb_pv, requested, tolerance)
+wait_for_readback(actual_pv, requested, actual_tolerance)
+image_path, metadata_path = acquire_image()
+```
+
+The tolerance values are practical test settings, not calibrated camera accuracy specifications. The monitoring PV can lag or be stale; the JSON metadata of the **acquired image** remains authoritative for that plotted point. A queued older frame is still a possible edge case and has not been ruled out by this wait alone.
+
 For each requested value, the program:
 
 1. Writes `CAM:ScanSetExposure` or `CAM:ScanSetGain`.
 2. Waits until `CAM:ExposureRB` or `CAM:GainRB` matches the requested setting (gain uses a small tolerance).
-3. Reads the previous `CAM:GetLatestImagePath`, sends `Acquire`, and waits for a changed image path.
-4. Waits for the corresponding `CAM:GetLatestMetadataPath`.
-5. Opens the JSON and extracts `ExposureTime` or `AnalogueGain` for the **captured frame**.
-6. Opens the JPEG, converts it to 8-bit grayscale, and calculates the image-wide mean.
-7. Appends a CSV row and updates scan-result PVs.
+3. Waits for `CAM:GetExposure` or `CAM:GetGain` to approach the requested setting within a provisional tolerance (100 µs for exposure or 0.05 for gain).
+4. Reads the previous `CAM:GetLatestImagePath`, sends `Acquire`, and waits for a changed image path.
+5. Waits for the corresponding `CAM:GetLatestMetadataPath`.
+6. Opens the JSON and extracts `ExposureTime` or `AnalogueGain` for the **captured frame**.
+7. Opens the JPEG, converts it to 8-bit grayscale, and calculates the image-wide mean.
+8. Appends a CSV row and updates scan-result PVs.
 
 The mean-intensity calculation is conceptually:
 
@@ -181,7 +203,15 @@ The IOC waveform record uses `FTVL=DOUBLE` and `NELM=100`: it allocates capacity
 
 At the beginning of a scan, the script writes a one-element `NaN` array as a non-plottable placeholder. This is **not** a truly empty array. X and Y arrays are written in separate PV operations, so their updates are not atomic.
 
-## 9. Phoebus XY Plot and the CA/PVA difference
+## 9. Phoebus displays, XY Plot and the CA/PVA difference
+
+Three version-controlled Phoebus displays are stored in `phoebus/`:
+
+- `epics_Camera_vision_main.bob` — main camera controls and entry point.
+- `epics_Camera_vision_scan_exposure.bob` — exposure scan controls and plot.
+- `epics_Camera_vision_scan_gain.bob` — gain scan controls and plot.
+
+The main display uses separate Action Buttons to select `CAM:ScanType` and open the corresponding scan display. The display actions should use relative `.bob` paths for portability.
 
 For exposure scans, configure the XY Plot trace as:
 
@@ -238,10 +268,10 @@ pvget CAM:ScanIntensity
 
 Expect three completed points and a completed status for a successful three-point scan. Use the `pva://` PV names in the Phoebus XY Plot. These are test settings, not a calibrated sensor-characterization procedure.
 
-## 12. Limitations and next validation
+## 12. Verified behavior and remaining limitations
 
-- Gain scans are implemented in the scan logic but require dedicated end-to-end testing.
-- Stop Scan and repeated-scan behavior require more testing; stop requests are checked cooperatively.
+- Exposure and gain scans, Stop Scan, and repeated scans worked in the reported tests; extended stress and failure-recovery testing has not been completed. Stop requests are checked cooperatively, not as immediate camera-capture interrupts.
+- The Stop Scan PV is not automatically reset after an interrupted scan; this behavior is intentionally left unchanged.
 - The scan program does not provide strict exclusive ownership of scan setters.
 - Automatic exposure is disabled on entering scan mode and checked before running, but the current database does not prevent another client from re-enabling it.
 - Waveform X/Y writes are separate; temporary mismatch during refresh is possible.
