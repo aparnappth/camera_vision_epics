@@ -1,7 +1,7 @@
 # Implementation and Results
 
 **EPICS-Controlled Camera Characterization and Vision Platform**  
-**Development record through 28 October 2026**
+**Development record through 29 October 2026**
 
 This document records the implementation stages, design decisions, tests and observed results of the project. It complements the [project overview](../README.md), the [StreamDevice IOC implementation guide](streamdevice_ioc.md), and the [troubleshooting record](troubleshooting.md). Earlier experiments are retained as historical results even where their scripts have since been retired.
 
@@ -239,6 +239,41 @@ Three Phoebus `.bob` displays were added to the repository under `phoebus/`:
 The main display provides separate actions for exposure and gain scans, selecting the corresponding scan type and opening the relevant display. The XY plots use `pva://CAM:ScanExposure` or `pva://CAM:ScanGain` for X and `pva://CAM:ScanIntensity` for Y. The three display files were committed to GitHub and synchronized with the Raspberry Pi repository.
 
 **Result:** Exposure and gain scanning, frame-setting verification, cooperative stopping, repeated scan operation, and the separate Phoebus scan displays were tested successfully. Further work may investigate resilience under communication failures and the previously observed Phoebus responsiveness issue.
+
+### 15. Touch Sensor and RGB LED Status Indicator (29 October 2026)
+
+A standalone touch-controlled RGB LED status indicator was developed as an initial hardware component for the planned camera-based vision and alarm-monitoring system. The implementation uses the Raspberry Pi GPIO interface through Python's `gpiozero` library. The digital touch sensor uses BCM GPIO 17 (`DigitalInputDevice`, `pull_up=False`), and the RGB LED uses GPIO 22, 23 and 24 for its red, green and blue channels, with PWM enabled.
+
+#### 15.1 Independent hardware tests
+
+Two standalone programs were developed and physically tested before combining the components:
+
+- `hardware/touch_led/test_touch.py` uses activation and deactivation callbacks to print `Touched` and `Released` when the sensor state changes. `signal.pause()` keeps the program running to receive events.
+- `hardware/touch_led/test_rgb_led.py` cycles the RGB LED through red, green, blue, yellow and OFF, with each state held for two seconds. It uses `RGBLED` with `active_high=True` and PWM enabled.
+
+Both individual tests worked on the Raspberry Pi.
+
+#### 15.2 Touch-controlled status logic
+
+The combined program, `hardware/touch_led/led_controller.py`, monitors continuous touch duration and applies three states:
+
+| Touch condition | LED colour | Status |
+|---|---|---|
+| Inactive, or active for less than 1 second | Green | `NORMAL` |
+| Active for at least 1 second and at most 6 seconds | Yellow | `WARNING` |
+| Active for more than 6 seconds | Red | `FAULT` |
+
+Touch duration is measured with `time.monotonic()`, and the sensor is checked in a loop with a nominal 50 ms sleep interval. Releasing the sensor resets the timer and restores the green NORMAL state. The program changes the LED output and prints the status only when the requested colour changes, rather than on every loop iteration.
+
+The program handles `KeyboardInterrupt` and uses a `finally` block to switch off the LED and close both GPIO devices.
+
+#### 15.3 Verification and next stage
+
+The independent sensor and LED tests, the combined green-to-yellow-to-red transitions, and the return to green on release were physically tested successfully on the Raspberry Pi.
+
+**Result:** A working standalone touch-controlled RGB LED indicator with duration-dependent NORMAL, WARNING and FAULT states. It currently operates independently of EPICS and the camera-control server.
+
+**Planned:** Detect the red LED through the IMX219 camera, publish the recognition result through EPICS and display a visual alarm in Phoebus. A physical buzzer alarm is intended for a later stage; neither vision recognition nor alarm integration is implemented at this checkpoint.
 
 ### Possible Future Extensions
 
