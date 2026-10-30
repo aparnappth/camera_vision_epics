@@ -1,11 +1,11 @@
 # Implementation and Results
 
 **EPICS-Controlled Camera Characterization and Vision Platform**  
-**Development record through 29 October 2026**
+**Development record through 30 October 2026**
 
 This document records the implementation stages, design decisions, tests and observed results of the project. It complements the [project overview](../README.md), the [StreamDevice IOC implementation guide](streamdevice_ioc.md), and the [troubleshooting record](troubleshooting.md). Earlier experiments are retained as historical results even where their scripts have since been retired.
 
-The currently active scan controller is `automation/camera_scan.py`. Exposure and gain scans, Stop Scan, repeated scanning, and live Phoebus plotting have been exercised successfully. Broader communication and display-performance testing remains open.
+The active scan controller is `automation/camera_scan.py`; the separate `vision/led_monitor.py` now performs periodic camera-based RGB LED status recognition through EPICS. Exposure and gain scans, LED status publication, and Phoebus visualization have been exercised successfully. Broader reliability and performance testing remains open.
 
 ---
 
@@ -275,11 +275,68 @@ The independent sensor and LED tests, the combined green-to-yellow-to-red transi
 
 **Planned:** Detect the red LED through the IMX219 camera, publish the recognition result through EPICS and display a visual alarm in Phoebus. A physical buzzer alarm is intended for a later stage; neither vision recognition nor alarm integration is implemented at this checkpoint.
 
+### 16. Camera-Based LED Recognition and EPICS Vision Monitoring (30 October 2026)
+
+The standalone touch-controlled RGB LED from Section 15 was used as a visual target for a camera-based monitoring experiment. The existing IMX219 camera, Picamera2 TCP service, StreamDevice IOC and saved-image acquisition path were reused. The touch/LED controller remains independent: the vision system determines the LED state from acquired JPEG pixels, not from the touch sensor or GPIO output state.
+
+#### 16.1 Full-image colour segmentation and classification
+
+A standalone test script, `vision/test_led_detection.py`, was developed to read `CAM:GetLatestImagePath` using PyEpics, open the latest JPEG, convert it to HSV with Pillow and use NumPy masks to count bright, saturated red, yellow and green pixels. The analysis covers the entire image without a fixed region of interest, because the camera position may change. Diagnostic colour-mask PNGs were saved under `data/vision/` during testing.
+
+The experimental classifier uses the red-to-green pixel-count ratio and the fraction of detected coloured pixels classified as yellow. It reports `UNKNOWN`, `NORMAL`, `WARNING` or `FAULT`. Initial thresholds were revised after some yellow LED images were reported as NORMAL. The touch sensor was also observed flickering during some attempts, making the actual LED state at acquisition time important when interpreting those results. The revised classifier correctly reported NORMAL, WARNING (on two acquisitions) and FAULT in the subsequent reported tests.
+
+Representative results from 30 October are:
+
+| Observed LED state | Red pixels | Yellow pixels | Green pixels | Detected state |
+|---|---:|---:|---:|---|
+| Green | 4,178 | 19 | 36,119 | NORMAL |
+| Yellow | 16,939 | 3,455 | 7,150 | WARNING |
+| Yellow | 16,419 | 4,351 | 10,527 | WARNING |
+| Red | 34,232 | 388 | 35 | FAULT |
+
+**Result:** The revised full-image HSV classifier distinguished the three LED states in the reported controlled tests with automatic exposure enabled. The colour thresholds are experimental and do not establish reliable recognition under arbitrary backgrounds, lighting, or LED-absent conditions.
+
+#### 16.2 Automated acquisition and EPICS status publication
+
+The separate `vision/led_monitor.py` program uses PyEpics to control monitoring and publish results through soft IOC records. When `CAM:VisionEnable` is enabled, it requests a new still-image acquisition through the existing `CAM:CameraCommand` approximately every three seconds, waits for a changed image path and matching metadata path, reads the saved JPEG/JSON pair, classifies the LED and updates the EPICS results. The JSON metadata supplies camera-reported exposure and gain for context; LED colour is determined from JPEG pixels.
+
+The vision interface added to `camera.db` comprises:
+
+| PV | Purpose |
+|---|---|
+| `CAM:VisionEnable` | Enable or disable periodic vision monitoring |
+| `CAM:VisionStatus` | Monitoring state: IDLE, RUNNING, ERROR, WAITING |
+| `CAM:LEDStatus` | Detected state: UNKNOWN, NORMAL, WARNING, FAULT |
+| `CAM:LEDRedGreenRatio` | Latest red/green pixel-count ratio |
+| `CAM:LEDYellowFraction` | Latest yellow-pixel fraction |
+
+These are conventional IOC soft records updated by the PyEpics program. No new StreamDevice commands or additional camera TCP connection were introduced. On startup, or when monitoring is not active, the reported LED state is UNKNOWN rather than assuming NORMAL. Acquisition and analysis failures also invalidate the LED result.
+
+#### 16.3 Scan coordination and automatic exposure
+
+The scan and vision workflows were coordinated to avoid simultaneous camera acquisition. When vision monitoring is requested during an active scan, the vision program waits for the scan to finish, disables `CAM:ScanEnable` and then begins monitoring. New scans were reported to be prevented while vision monitoring was enabled. The operator verified these handover behaviours in the tested workflow.
+
+Because `SDIS` controls EPICS record processing rather than guaranteeing rejection of writes to a soft record's stored value, mode coordination is handled by application-level checks rather than relying on symmetric `SDIS` links between enable PVs.
+
+The monitor also enables automatic exposure once on entering vision mode, using `CAM:SetAutoExposure`, and checks `CAM:GetAutoExposure` before starting acquisition. This transition was tested successfully. The readback confirms the requested automatic-exposure setting held by the camera service; it does not independently establish that exposure has settled on the first frame.
+
+#### 16.4 Phoebus visualization and verification
+
+LED monitoring controls and status visualization were added to the existing `phoebus/epics_Camera_vision_main.bob` display on Windows, rather than creating a separate LED-monitor display. The Phoebus changes and the Raspberry Pi Python/IOC changes were committed and synchronized through the shared GitHub repository. The operator reported that the EPICS monitoring workflow and Phoebus display were working as expected.
+
+**Result:** Periodic camera-based LED recognition, EPICS status updates, automatic-exposure activation, scan-to-vision handover and visual monitoring in Phoebus were demonstrated in the reported tests. A physical buzzer alarm has not yet been implemented.
+
+#### 16.5 Current limitation: periodic still-image monitoring
+
+The vision monitor does not continuously analyze camera frames. It requests a still-image acquisition approximately once every three seconds and processes the saved JPEG. LED state changes can therefore appear in EPICS and Phoebus only after a subsequent acquisition and processing cycle. The delay can approach the acquisition interval plus capture, file handling, analysis and EPICS update time; short-lived states can be missed between acquisitions. This is periodic monitoring, not continuous live vision processing.
+
 ### Possible Future Extensions
 
 The following are exploratory options rather than scheduled implementation work:
 
 - Perform in-memory image acquisition and intensity analysis without saving every frame.
-- Explore continuous image streaming through EPICS instead of displaying only the latest saved image.
+- Explore continuous frame-based LED recognition to reduce detection latency and avoid saving a JPEG for every monitoring cycle.
+- Investigate a separate areaDetector-based IMX219 implementation and its NDArray/plugin pipeline; compare its acquisition and processing path with the current StreamDevice/Python TCP approach. Removing the custom TCP path alone does not guarantee lower latency.
+- Consider a physical buzzer driven by the detected alarm state after additional validation.
 - Extend image processing and analysis beyond image-wide mean grayscale intensity.
 - Improve communication recovery and synchronization across IOC or camera-server disconnects.
