@@ -1305,6 +1305,65 @@ The repository now contains three Phoebus `.bob` displays under `phoebus/`: `epi
 
 These checks establish the behavior observed in the tested workflows, not exhaustive performance, disconnect/reconnect, or long-duration reliability.
 
+## 54. Yellow LED Initially Misclassified as NORMAL — 30 October 2026
+
+**Symptom**
+
+The first full-image HSV classifier correctly identified the green and red LED reference images, but several acquisitions with the LED intended to be yellow returned `NORMAL`. The standalone diagnostic script `vision/test_led_detection.py` read the latest saved JPEG path from `CAM:GetLatestImagePath`, segmented red, yellow and green pixels, and saved colour-mask PNGs under `data/vision/`.
+
+**Measurements and investigation**
+
+| Image time | Red pixels | Yellow pixels | Green pixels | Reported status |
+|---|---:|---:|---:|---|
+| 12:02:40 | 600 | 2,475 | 16,039 | NORMAL |
+| 12:14:33 | 1,612 | 7,117 | 17,858 | NORMAL |
+| 12:15:11 | 12,308 | 2,941 | 6,508 | WARNING |
+
+The initial classifier returned `NORMAL` when `red_count / max(green_count, 1) < 0.2`, before considering the proportion of yellow pixels. This ordering could classify a visibly yellow-looking image as NORMAL whenever green pixels dominated. Diagnostic masks showed that the yellow LED could generate both green and yellow regions, rather than a uniform yellow patch.
+
+The operator subsequently noticed that the physical LED had flickered during some tests. The standalone touch controller resets its touch-duration timer and returns to green whenever the digital touch input becomes inactive. This is a plausible additional source of inconsistent reference images; the observations do not establish which individual frames were captured during a transition.
+
+**Experimental change and outcome**
+
+The classifier was revised to prioritize a strong red response for `FAULT`, then a yellow-pixel fraction above 0.10 for `WARNING`, and finally a green-dominant, low-yellow response for `NORMAL`. Other combinations return `UNKNOWN`. These thresholds are provisional, not calibrated limits.
+
+Subsequent observed tests produced the expected statuses:
+
+| Image time | Red/green ratio | Yellow fraction | Detected status |
+|---|---:|---:|---|
+| 12:28:19 | 0.1157 | 0.0005 | NORMAL |
+| 12:29:02 | 2.3691 | 0.1254 | WARNING |
+| 12:29:50 | 1.5597 | 0.1390 | WARNING |
+| 12:30:34 | 978.0571 | 0.0112 | FAULT |
+
+**Result:** The revised classifier worked in the reported green, yellow and red tests. Robustness to different backgrounds, an absent LED, reflections and camera movement has not been established. The full-image counts do not by themselves identify the LED as a distinct object.
+
+## 55. EPICS Mode Interlocking: Record Processing Versus Stored Values
+
+**Design question**
+
+During the vision-monitoring integration, symmetric `SDIS`/`DISV` links on `CAM:ScanEnable` and `CAM:VisionEnable` were considered as a way to prevent concurrent camera operations.
+
+**Clarification**
+
+`SDIS` suppresses record processing when its disable condition is met; it is not a general write-access control for `VAL`. A PyEpics program polling a soft `bo` record may observe a value written by a client even if the record's processing was disabled. This differs from disabling processing of a StreamDevice output setter, where the intended hardware command is suppressed.
+
+**Chosen approach and verification**
+
+The enable and start-request soft records were left without mutual `SDIS` interlocks. The vision program checks scan mode and scan status, waits for an active scan to finish, then disables scan mode before acquiring. The operator reported that scan-to-vision handover and prevention of new scans while vision monitoring is enabled were tested successfully. The application-level coordination is intended for the current single-operator workflow; it is not an atomic multi-client camera lock.
+
+## 56. Periodic LED Acquisition and Detection Delay
+
+**Observed design limitation**
+
+`vision/led_monitor.py` requests a saved JPEG/JSON acquisition approximately every three seconds through the existing IOC and camera server. It analyzes the JPEG and publishes `CAM:LEDStatus`, `CAM:LEDRedGreenRatio` and `CAM:LEDYellowFraction` to soft IOC records. The matching JSON provides frame-specific camera metadata, not the LED colour itself.
+
+This is periodic still-image monitoring, **not continuous frame processing**. A physical colour change can be detected only after a subsequent acquisition and analysis; the delay can approach the acquisition interval plus capture, processing and EPICS update time. A short-lived state may be missed between acquisitions.
+
+**Possible extensions (not yet implemented)**
+
+Investigate direct frame-based analysis and evaluate whether a suitable areaDetector camera driver and NDArray/plugin pipeline can support more frequent processing without the current repeated JPEG workflow. areaDetector does not automatically guarantee lower latency; feasibility depends on the IMX219 driver and processing architecture. A physical buzzer alarm remains a separate possible extension.
+
 ---
 
-**Documentation status (28 October 2026):** Exposure and gain scans, scan-setting synchronization, saved JPEG/JSON acquisition, intensity calculation, CSV logging, live PVAccess XY plotting, Stop Scan interruption, and repeated scan operation have been demonstrated. Waiting for `STREAMING` resolved the observed startup response mismatches in the reported tests. The general single-port notification/acknowledgement ordering problem, stale-value indication, reconnect/error recovery, and Phoebus performance under broader conditions remain open areas for investigation.
+**Documentation status (30 October 2026):** The standalone touch-controlled RGB LED, experimental HSV-based colour recognition, periodic EPICS LED monitoring, automatic-exposure activation, Phoebus status visualization and scan/vision coordination have been exercised successfully in the reported tests. The main vision limitation is detection latency from approximately three-second still-image acquisition. Colour-classification generalization, LED-absence detection, shared-TCP message ordering, reconnection handling and broader display-performance testing remain open investigations.
