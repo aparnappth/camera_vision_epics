@@ -290,4 +290,80 @@
     <width>70</width>
     <height>30</height>
   </widget>
+  <widget type="bool_button" version="2.0.0">
+    <name>Boolean Button_2</name>
+    <pv_name>CAM:VisionEnable</pv_name>
+    <x>660</x>
+    <y>310</y>
+    <off_label>Vision disable</off_label>
+    <on_label>Vision enable</on_label>
+  </widget>
+  <widget type="label" version="2.0.0">
+    <name>Label_2</name>
+    <text>Vision status</text>
+    <x>660</x>
+    <y>370</y>
+    <horizontal_alignment>1</horizontal_alignment>
+    <vertical_alignment>1</vertical_alignment>
+  </widget>
+  <widget type="textupdate" version="2.0.0">
+    <name>Text Update_6</name>
+    <pv_name>CAM:VisionStatus</pv_name>
+    <x>660</x>
+    <y>390</y>
+    <width>101</width>
+    <horizontal_alignment>1</horizontal_alignment>
+    <vertical_alignment>1</vertical_alignment>
+  </widget>
+  <widget type="label" version="2.0.0">
+    <name>Label_3</name>
+    <text>LED Status</text>
+    <x>660</x>
+    <y>440</y>
+    <width>90</width>
+    <horizontal_alignment>1</horizontal_alignment>
+    <vertical_alignment>1</vertical_alignment>
+  </widget>
+  <widget type="multi_state_led" version="2.0.0">
+    <name>LED (Multi State)</name>
+    <pv_name>CAM:LEDStatus</pv_name>
+    <x>660</x>
+    <y>460</y>
+    <width>91</width>
+    <height>30</height>
+    <states>
+      <state>
+        <value>0</value>
+        <label>UNKNOWN</label>
+        <color>
+          <color name="Off" red="60" green="100" blue="60">
+          </color>
+        </color>
+      </state>
+      <state>
+        <value>1</value>
+        <label>NORMAL</label>
+        <color>
+          <color name="On" red="0" green="255" blue="0">
+          </color>
+        </color>
+      </state>
+      <state>
+        <value>2</value>
+        <label>WARNING</label>
+        <color>
+          <color name="MINOR" red="255" green="128" blue="0">
+          </color>
+        </color>
+      </state>
+      <state>
+        <value>3</value>
+        <label>FAULT</label>
+        <color>
+          <color name="MAJOR" red="255" green="0" blue="0">
+          </color>
+        </color>
+      </state>
+    </states>
+  </widget>
 </display>
