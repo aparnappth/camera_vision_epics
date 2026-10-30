@@ -1,6 +1,8 @@
 # EPICS-Controlled Camera Characterization and Vision Platform
 
-An experimental camera-control and measurement platform built around a **Raspberry Pi Zero 2 W**, **Sony IMX219 CSI camera**, and **EPICS**. The system provides remote camera operation, automated exposure and gain scans, image acquisition with matching metadata, camera-setting monitoring, and visualization through Phoebus. A touch-controlled RGB LED provides a standalone status indicator; camera-based colour recognition publishes its detected state through EPICS for monitoring in Phoebus.
+An experimental camera-control and computer-vision platform built using a Raspberry Pi Zero 2 W, Sony IMX219 camera, and EPICS (Experimental Physics and Industrial Control System).
+
+The platform currently supports remote camera control, image acquisition, adjustment of camera settings, and automated exposure and gain scans to study the camera's response to different settings. It also demonstrates camera-based device status monitoring using computer vision. A touch-controlled RGB LED serves as a simulated device representing normal, warning, and fault conditions. The camera identifies these states by analyzing the LED colour, and the results are displayed through Phoebus, a graphical interface for controlling and monitoring the system through EPICS.
 
 ## Capabilities
 
@@ -25,44 +27,91 @@ An experimental camera-control and measurement platform built around a **Raspber
 
 ## System Architecture
 
+The platform consists of a camera-control system, independent Python programs for automated measurements and image analysis, and a graphical interface for remote operation. The components communicate through EPICS, while the Raspberry Pi manages the physical camera and connected hardware.
+
 ```text
-                  Phoebus / EPICS clients
-                    Channel Access / PVAccess
-                              |
-                         EPICS IOC + QSRV
-                              |
-                        StreamDevice + asyn
-                              |
-                        TCP 127.0.0.1:5000
-                              |
-                    Python camera server
-                              |
-                      Picamera2 / libcamera
-                              |
-                           IMX219
+                         Phoebus / EPICS clients
+                       (Remote control and display)
+                                   |
+                         Channel Access / PVAccess
+                                   |
+                           EPICS IOC + QSRV
+                         (Control and data PVs)
+                                   |
+                           StreamDevice + asyn
+                                   |
+                           TCP 127.0.0.1:5000
+                                   |
+                            Python camera server
+                          acquisition/picamera2_server.py
+                                   |
+                            Picamera2 / libcamera
+                                   |
+                              IMX219 camera
+                                   |
+                           Acquired JPEG + JSON
+                                   |
+                  +----------------+----------------+
+                  |                |                |
+                  v                v                v
+             Camera scan      LED recognition    Image publisher
+             camera_scan.py   led_monitor.py     pva_image_publisher.py
+                  |                |                |
+             Mean intensity   LED colour       Resized RGB image
+             Exposure/gain    and status       published via p4p
+             scan results          |                |
+                  |                |                |
+                  v                v                v
+             EPICS scan       EPICS vision       CAM:Image
+             result PVs       status PVs         (PVAccess)
+                  |                |                |
+                  v                v                v
+             Phoebus XY       Phoebus LED        Phoebus Image
+                plots         status display        widget
 
-  automation/camera_scan.py --PyEpics--> IOC scan/control/result PVs
-             |                               |
-             +-- reads saved JPEG/JSON       +-- scan waveform arrays
-                 and calculates intensity         --> Phoebus XY Plot
 
-   acquisition/pva_image_publisher.py --p4p--> CAM:Image
-       (reads latest saved JPEG)                --> Phoebus Image widget
+    Independent hardware used for vision monitoring:
 
-   hardware/touch_led/led_controller.py --> RGB LED (independent GPIO control)
-                                               | observed by IMX219
-   vision/led_monitor.py --PyEpics--> IOC vision/control/result PVs
-       (requests JPEG/JSON every ~3 s,         --> Phoebus LED status
-        classifies LED colour from JPEG)
+        Touch sensor --> led_controller.py --> RGB LED
+                                                  |
+                                      Observed by IMX219 camera
 ```
 
-The camera server and IOC are separate processes on the Raspberry Pi. The server uses a `TCPConnection` class to manage **one accepted IOC TCP connection** and serialize outgoing writes. A Picamera2 frame callback collects applied exposure and gain metadata; a lightweight worker sends change-based notifications. StreamDevice I/O Intr updates the corresponding IOC readbacks.
+### Camera control and communication
 
-The scan controller is a separate **sequential** PyEpics program. It reads scan configuration from IOC soft records, starts streaming when necessary and waits for `CAM:GetStatus` to report `STREAMING`, then sets scan-specific camera controls. It verifies the requested-setting readback and waits for the camera-reported exposure or gain to approach the requested value before acquisition. It then acquires images, computes intensity, and publishes scan results. It does not create its own EPICS PVs.
+The Python camera server (`acquisition/picamera2_server.py`) manages the IMX219 camera through Picamera2 and libcamera. It handles camera initialization, streaming, exposure and gain settings, and image acquisition.
 
-The image publisher is another independent process. It reads locally saved JPEGs and publishes a resized 100 × 100 RGB array over PVAccess as `CAM:Image`. This is acquired-image visualization, **not live video**.
+The EPICS IOC communicates with the Python server through StreamDevice and asyn over a local TCP connection. It exposes process variables (PVs) for camera control, settings, status monitoring, and measurement results. Phoebus and other EPICS clients access these PVs through Channel Access or PVAccess.
 
-The touch-controlled LED program operates independently of EPICS. The separate sequential `vision/led_monitor.py` uses PyEpics to request a JPEG/JSON acquisition approximately every three seconds, analyzes the full JPEG with HSV colour thresholds, and writes its classification and diagnostic values to IOC soft records. It waits for an active scan to finish before taking over, and enables automatic exposure when vision monitoring starts. An areaDetector-based implementation remains an option for investigation.
+The camera server and IOC run as separate processes on the Raspberry Pi. The server uses a `TCPConnection` class to manage the single IOC TCP connection and serialize outgoing messages. Camera-reported exposure and gain values are collected from frame metadata and published to the IOC through StreamDevice I/O Intr notifications.
+
+### Automated camera scanning
+
+The independent `automation/camera_scan.py` program communicates with the IOC through PyEpics. It performs configurable exposure and gain scans by adjusting camera settings, acquiring images, and calculating mean grayscale intensity from saved JPEG files.
+
+The program verifies requested settings against their readbacks and waits for the camera-reported exposure or gain to approach the requested value before acquisition. Results are published to IOC soft records and displayed as XY plots in Phoebus. The associated JPEG images, JSON metadata, and scan CSV files are retained on the Raspberry Pi.
+
+### Camera-based LED status monitoring
+
+A touch-controlled RGB LED serves as a simulated device for testing the platform's computer-vision capabilities. The standalone `hardware/touch_led/led_controller.py` program changes the LED between green (NORMAL), yellow (WARNING), and red (FAULT) based on touch duration. This program operates independently of EPICS.
+
+The IMX219 camera observes the LED. The separate `vision/led_monitor.py` program uses PyEpics to request a new image approximately every three seconds, reads the saved JPEG and matching metadata, and analyzes the image using HSV colour segmentation.
+
+The detected status and numerical colour measurements are published to IOC soft records and displayed in Phoebus. When vision monitoring is enabled, the program first checks whether a camera scan is running. If a scan is in progress, it waits for the scan to finish before disabling scan mode and starting LED monitoring. It also automatically enables the camera's automatic exposure setting before acquiring images. New camera scans are prevented from starting while vision monitoring is enabled.
+
+### Image visualization
+
+The independent `acquisition/pva_image_publisher.py` program reads the latest acquired JPEG and publishes a resized 100 × 100 RGB image as `CAM:Image` using the `p4p` PVAccess library.
+
+Phoebus displays the image through its Image widget. Image pixels are transferred separately from the StreamDevice TCP connection used for camera commands.
+
+The current implementation displays acquired images rather than continuous live video. Both the camera scanner and LED monitor use saved images for analysis.
+
+### Design approach
+
+The system separates camera hardware control, automated measurements, image processing, and visualization into independent programs. The camera server remains the only process accessing the physical IMX219 camera, while the scan and vision programs communicate through the existing EPICS IOC.
+
+This arrangement allows measurement and vision functionality to be developed and tested independently without changing the underlying camera-control interface.
 
 ## EPICS Interface
 
@@ -197,18 +246,16 @@ camera_vision_epics/
 └── epics/streamdevice_camera/streamdevice_camera_ioc/
 ```
 
-Captured JPEG and JSON metadata files are saved on the Raspberry Pi. File-path PVs expose their locations, **not their contents**. Scan CSVs are written on the computer running the scan program. Generated data and the project virtual environment are excluded from version control. The touch/LED GPIO controller and the vision monitor are separate processes.
+The repository is organized into separate directories for camera control, EPICS integration, automated scanning, image processing, hardware experiments, Phoebus displays, and documentation. Python source code and configuration files are version-controlled, while generated data, including acquired JPEG images, JSON metadata, scan results, and vision-analysis outputs, are stored separately and excluded from Git.
 
 ## Current Limitations
 
-- The camera TCP server supports one active IOC connection. Commands and unsolicited notifications share it; a write lock prevents overlapping writes but does not guarantee StreamDevice message ordering. Global `ExtraInput = Ignore;` is enabled experimentally, not established as a fix for all mismatches.
-- Image acquisition is synchronous; the server does not handle other camera commands during a blocking acquisition. The output-only camera command protocol does not wait for an acknowledgement, although Python still sends `OK`.
-- Brief intermediate camera states may not appear in every monitor update. Camera-reported exposure/gain PVs may retain stale values after streaming stops; validity signaling and reconnection synchronization remain incomplete. The scan therefore waits for `STREAMING` and for the reported setting to approach the target before acquiring a frame; capture-queue behavior is not independently guaranteed by these checks.
-- Stop Scan is cooperative rather than an immediate camera-capture interrupt; the Stop PV remains set after a stop unless explicitly cleared. Repeated-scan stress testing and Phoebus responsiveness remain open checks.
+- The camera server uses a single TCP connection to communicate with the EPICS IOC. During image acquisition, rapid camera status changes may not always be captured or displayed by EPICS monitoring clients. However, the final camera status is reported correctly in the tested scenarios.
 - Mean intensity is calculated from processed JPEGs. These results are not raw-sensor linearity, noise, or calibrated characterization measurements.
-- The image publisher transfers a reduced-resolution RGB array, not full-resolution files or live video. It can miss intermediate acquisitions between path checks.
+- The image publisher transfers a reduced-resolution RGB array, not full-resolution files or live video. 
 - File-based scan and vision analysis currently require access to JPEG/JSON files on the Raspberry Pi. Remote file transfer and portable dataset paths are not implemented.
 - LED recognition uses periodic still-image acquisition approximately every three seconds, not continuous frame processing. Changes can be detected only after a new acquisition and analysis; short-lived states may be missed. HSV thresholds were tested in a controlled scene and are not yet validated against arbitrary backgrounds or LED absence.
+
 
 ## Possible Future Extensions
 
