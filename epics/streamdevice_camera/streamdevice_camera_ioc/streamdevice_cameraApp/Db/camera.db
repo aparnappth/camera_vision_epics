@@ -292,3 +292,47 @@ record(bo, "$(P)$(R)StopScan") {
     field(ONAM, "Stop")
     field(SCAN, "Passive")
 }
+
+
+
+# LED vision monitoring
+
+record(bo, "$(P)$(R)VisionEnable") {
+    field(DESC, "Enable LED vision monitoring")
+    field(ZNAM, "Disable")
+    field(ONAM, "Enable")
+    field(VAL, "0")
+    field(PINI, "NO")
+}
+
+record(mbbo, "$(P)$(R)LEDStatus") {
+    field(DESC, "Camera-detected LED status")
+    field(ZRST, "UNKNOWN")
+    field(ONST, "NORMAL")
+    field(TWST, "WARNING")
+    field(THST, "FAULT")
+    field(VAL, "0")
+    field(PINI, "NO")
+}
+
+record(mbbo, "$(P)$(R)VisionStatus") {
+    field(DESC, "LED monitoring program status")
+    field(ZRST, "IDLE")
+    field(ONST, "RUNNING")
+    field(TWST, "ERROR")
+    field(THST, "WAITING")
+    field(VAL, "0")
+    field(SCAN, "Passive")
+}
+
+record(ao, "$(P)$(R)LEDRedGreenRatio") {
+    field(DESC, "LED red-to-green pixel ratio")
+    field(PREC, "4")
+}
+
+record(ao, "$(P)$(R)LEDYellowFraction") {
+    field(DESC, "Fraction of detected yellow pixels")
+    field(PREC, "4")
+}
+
+
