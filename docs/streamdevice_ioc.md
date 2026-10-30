@@ -1,6 +1,6 @@
 # StreamDevice Camera IOC — Implementation Guide
 
-This guide documents the conventional EPICS IOC developed for the [EPICS-Controlled Camera Characterization and Vision Platform](../README.md). It covers the simulated TCP service, the conventional IOC and its CA/PVA support, standalone Picamera2 acquisition, and the expanded Python TCP camera server tested in October 2026. The expanded acquisition commands and event-driven status/file-path monitoring are integrated into the IOC and have been tested through Channel Access and PVAccess. The separate Python PVAccess image publisher and Phoebus display are also described at an architectural level. Section 23 describes the 26 October TCP refactoring and actual-value monitoring. Section 24 documents EPICS-controlled scanning and the 28 October synchronization tests. Older configurations are retained as explicitly historical examples; use the later sections for current PV names and operation. Shared-port communication limitations remain documented below.
+This guide documents the conventional EPICS IOC developed for the [EPICS-Controlled Camera Characterization and Vision Platform](../README.md). It covers the simulated TCP service, the conventional IOC and its CA/PVA support, standalone Picamera2 acquisition, and the expanded Python TCP camera server tested in October 2026. The expanded acquisition commands and event-driven status/file-path monitoring are integrated into the IOC and have been tested through Channel Access and PVAccess. The separate Python PVAccess image publisher and Phoebus display are also described at an architectural level. Section 23 describes the 26 October TCP refactoring and actual-value monitoring. Section 24 documents EPICS-controlled scanning and the 28 October synchronization tests. Section 25 documents the 30 October LED vision-monitoring IOC interface. Older configurations are retained as explicitly historical examples; use the later sections for current PV names and operation. Shared-port communication limitations remain documented below.
 
 For dependency installation, see [EPICS Environment Setup](epics_setup.md). For errors encountered during development, see [Troubleshooting](troubleshooting.md).
 
@@ -1144,7 +1144,99 @@ The following display definitions are version-controlled under `phoebus/`:
 
 The main display provides separate exposure and gain action buttons that select the corresponding scan type and open its display. The XY plots use explicit `pva://` waveform PVs as documented above. Keep Open Display references relative so the display files remain portable.
 
-## 25. References
+## 25. EPICS LED vision monitoring (30 October 2026)
+
+This section documents the vision-related IOC additions and their tested use with `vision/led_monitor.py`. The existing Picamera2 camera server remains the sole camera-hardware owner. Vision monitoring is a separate sequential PyEpics client; it does not introduce another IOC, asyn port, camera TCP connection, or StreamDevice protocol command. The earlier touch/LED GPIO controller (`hardware/touch_led/led_controller.py`) remains independent of EPICS.
+
+### 25.1 Vision monitoring soft records
+
+The following records were added to `streamdevice_cameraApp/Db/camera.db` and are available with the `CAM:` prefix:
+
+| PV | Record | Values or purpose |
+|---|---|---|
+| `CAM:VisionEnable` | `bo` | Disable (0), Enable (1); operator request to run periodic monitoring |
+| `CAM:VisionStatus` | `mbbo` | IDLE (0), RUNNING (1), ERROR (2), WAITING (3) |
+| `CAM:LEDStatus` | `mbbo` | UNKNOWN (0), NORMAL (1), WARNING (2), FAULT (3) |
+| `CAM:LEDRedGreenRatio` | `ao` | Ratio of red-mask to green-mask pixel counts; `PREC=4` |
+| `CAM:LEDYellowFraction` | `ao` | Yellow-mask pixels divided by the sum of red, yellow and green mask counts; `PREC=4` |
+
+All five are **soft IOC records**, with no `DTYP="stream"` or device `OUT` link. `VisionEnable` is written by an operator or Phoebus; `led_monitor.py` reads it and writes the result/status PVs using PyEpics. The enum records start with `LEDStatus=UNKNOWN` and `VisionStatus=IDLE` when initialized; these are defaults rather than a measurement of camera or process health. A running Python monitor is required for the values to update. QSRV exposes these conventional IOC records over PVAccess as well as Channel Access.
+
+The current `VisionStatus` record defines the additional `THST="WAITING"` state, used when vision monitoring is waiting for scan activity to finish. The relevant enum definitions are:
+
+```text
+record(mbbo, "$(P)$(R)LEDStatus") {
+    field(ZRST, "UNKNOWN")
+    field(ONST, "NORMAL")
+    field(TWST, "WARNING")
+    field(THST, "FAULT")
+    field(VAL, "0")
+}
+
+record(mbbo, "$(P)$(R)VisionStatus") {
+    field(ZRST, "IDLE")
+    field(ONST, "RUNNING")
+    field(TWST, "ERROR")
+    field(THST, "WAITING")
+    field(VAL, "0")
+}
+```
+
+The full definitions, including descriptions, are maintained in `camera.db`.
+
+### 25.2 Periodic acquisition and classification path
+
+```text
+Phoebus / CA client --> CAM:VisionEnable (IOC soft record)
+                                |
+                                v
+                      vision/led_monitor.py (PyEpics)
+                         |               ^
+                         | Acquire       | latest JPEG/JSON paths
+                         v               |
+                    CAM:CameraCommand    CAM:GetLatestImagePath
+                         |               CAM:GetLatestMetadataPath
+                         v
+               Existing StreamDevice/asyn TCP connection
+                         |
+                         v
+               Picamera2 server --> saved JPEG + JSON
+                         |
+                         v
+               led_monitor.py: full-image HSV analysis
+                         |
+                         v
+               LEDStatus, VisionStatus, ratio, fraction
+                         |
+                         v
+                    Phoebus display
+```
+
+When enabled, the vision client requests a still-image acquisition approximately every three seconds using the existing `CAM:CameraCommand` value `Acquire=2`. It waits for a changed `CAM:GetLatestImagePath` and the correspondingly named metadata file, reads both local files, performs full-image HSV colour segmentation, and publishes its classification and diagnostic ratios to the soft PVs. The JSON metadata supplies frame-specific exposure and gain for diagnostic output; LED colour is derived from JPEG pixels, not from metadata. The separate `acquisition/pva_image_publisher.py` can display the latest acquired image via `pva://CAM:Image`; it is not the vision classifier.
+
+The classification uses provisional hue, saturation and brightness thresholds and distinguishes NORMAL, WARNING, FAULT and UNKNOWN. The standalone `vision/test_led_detection.py` was used to evaluate red, yellow and green masks and revise the classifier after initial yellow misclassifications. The tested colour states were reported correctly in subsequent controlled acquisitions. This is not a calibrated or general-purpose LED detector.
+
+### 25.3 Scan coordination and automatic exposure
+
+`CAM:ScanEnable` selects scan mode, whereas `CAM:ScanStatus` indicates whether the scan controller is RUNNING. When vision is requested while a scan is running, the vision program reports WAITING, waits for completion, disables `CAM:ScanEnable`, verifies the transition, and then begins monitoring. A new scan is prevented from starting while vision monitoring is enabled; both transition behaviours were reported tested. The two Python clients coordinate by reading the relevant IOC mode and status PVs. `SDIS`/`DISV` are retained for the normal-versus-scan exposure/gain device setters, not used as exclusive locks on the soft enable flags. The software coordination is not an atomic hardware-ownership lock.
+
+Before entering its acquisition loop, `led_monitor.py` uses the existing `CAM:SetAutoExposure` and `CAM:GetAutoExposure` PVs to enable and check automatic exposure. It does this once on entry rather than on each three-second cycle. The readback reflects the setting accepted by the camera server; it does not independently demonstrate that automatic exposure has settled on the first captured frame. The automatic-exposure transition and scan-to-vision handover were tested successfully.
+
+### 25.4 Phoebus verification and current limitation
+
+LED monitoring controls and status indicators were added to the **existing** `phoebus/epics_Camera_vision_main.bob` display on Windows and committed through the shared Git repository. No separate LED-monitor `.bob` display was created. The EPICS monitoring results and Phoebus presentation were reported working in the exercised tests.
+
+**Primary limitation:** this is periodic still-image monitoring, **not continuous video or frame-by-frame recognition**. An LED change may wait almost one three-second acquisition interval before the next request, plus acquisition, processing and EPICS publication time; short-lived states may be missed. The image classifier also assumes a reasonably stable background and has not been validated for absent LEDs or substantially different scenes. `UNKNOWN` is used when classification is uncertain or monitoring cannot supply a valid result, but this is not yet a comprehensive fail-safe alarm system.
+
+### 25.5 Possible future extensions
+
+- Investigate continuous in-memory frame processing to reduce LED-state detection latency.
+- Explore a separate areaDetector-based IMX219 implementation, if a suitable driver can be used or developed, and assess NDArray/plugin-based processing as an alternative to the current saved-JPEG workflow. Eliminating the custom TCP command interface alone does not guarantee lower latency.
+- Evaluate physical buzzer activation after further recognition and alarm-behaviour testing.
+
+For the experiment chronology and measured colour-mask results, see [Implementation and Results](implementation_and_results.md). For Python-level details, see [LED Vision Monitoring](notes/led_vision_monitoring.md).
+
+## 26. References
 
 - [EPICS Documentation](https://docs.epics-controls.org/)
 - [EPICS Base](https://github.com/epics-base/epics-base)
@@ -1157,4 +1249,4 @@ The main display provides separate exposure and gain action buttons that select 
 
 ---
 
-**Implementation status (28 October 2026):** Exposure and gain scans, Stop Scan interruption, repeated scans, actual-setting verification and Phoebus scan displays have been tested. Waiting for `STREAMING` before scanning resolved the observed startup protocol mismatches in the tested conditions. Shared-port message-ordering reliability, reconnection handling and display performance remain open areas for further investigation.
+**Implementation status (30 October 2026):** Exposure and gain scans, Stop Scan interruption, repeated scans, actual-setting verification, Phoebus scan displays, and periodic EPICS LED vision monitoring have been tested. Waiting for `STREAMING` before scanning resolved the observed startup protocol mismatches in the tested conditions. Shared-port message-ordering reliability, reconnection handling and display performance remain open areas for further investigation.
