@@ -3,6 +3,7 @@
 An experimental camera-control and computer-vision platform built using a Raspberry Pi Zero 2 W, Sony IMX219 camera, and EPICS (Experimental Physics and Industrial Control System).
 
 The platform currently supports remote camera control, image acquisition, adjustment of camera settings, and automated exposure and gain scans to study the camera's response to different settings. It also demonstrates camera-based device status monitoring using computer vision. A touch-controlled RGB LED serves as a simulated device representing normal, warning, and fault conditions. The camera identifies these states by analyzing the LED colour, and the results are displayed through Phoebus, a graphical interface for controlling and monitoring the system through EPICS.
+A separate areaDetector experiment also demonstrates direct transfer of an IMX219 RGB frame into an EPICS NDArray pipeline and display in Phoebus, without saving an intermediate JPEG.
 
 ## Capabilities
 
@@ -16,14 +17,15 @@ The platform currently supports remote camera control, image acquisition, adjust
 - Access IOC records locally or from network-connected EPICS clients using Channel Access and PVAccess.
 - Operate a standalone touch-controlled RGB LED with NORMAL (green), WARNING (yellow), and FAULT (red) states.
 - Monitor the LED through periodic camera acquisition, full-image HSV colour analysis, EPICS status PVs, and Phoebus indicators.
+- Acquire and publish a 320 × 240 RGB frame using Picamera2, PyEpics, NDDriverStdArrays, and NDPluginStdArrays, with a separate Phoebus areaDetector display.
 
-**Verification status:** Exposure and gain scans, image acquisition, intensity publication, scan interlocks, Stop Scan interruption, and PVAccess XY plotting have been tested. The standalone touch/LED controller, camera-based LED classification, periodic EPICS monitoring, automatic-exposure activation, scan/vision coordination, and Phoebus LED status display have also been tested. Further stress testing of TCP message handling, classification under changing scenes, and Phoebus responsiveness remains useful.
+**Verification status:** Exposure and gain scans, image acquisition, intensity publication, scan interlocks, Stop Scan interruption, and PVAccess XY plotting have been tested. The standalone touch/LED controller, camera-based LED classification, periodic EPICS monitoring, automatic-exposure activation, scan/vision coordination, and Phoebus LED status display have also been tested. The areaDetector single-frame transfer and Phoebus image display were also verified on 2 November 2026. Continuous areaDetector frame acquisition and performance measurements remain untested. Further stress testing of TCP message handling, classification under changing scenes, and Phoebus responsiveness remains useful.
 
 ## Hardware and Software
 
 **Hardware:** Raspberry Pi Zero 2 W; Sony IMX219 8 MP CSI camera; digital touch sensor on BCM GPIO 17; RGB LED on GPIO 22 (red), 23 (green), and 24 (blue). A buzzer is a possible later extension.
 
-**Software:** EPICS Base R7.0.10, asyn R4-46, StreamDevice 2.8.26, QSRV/PVAccess, Python 3, Picamera2/libcamera, PyEpics, NumPy, Pillow, p4p, gpiozero, Phoebus Display Builder. Netcat supports direct TCP testing; VLC supports camera positioning. Matplotlib may be used for future offline analysis.
+**Software:** EPICS Base R7.0.10, asyn R4-46, StreamDevice 2.8.26, ADCore R3-14, NDDriverStdArrays R1-3, busy R1-7-4, QSRV/PVAccess, Python 3, Picamera2/libcamera, PyEpics, NumPy, Pillow, p4p, gpiozero, Phoebus Display Builder. Netcat supports direct TCP testing; VLC supports camera positioning. Matplotlib may be used for future offline analysis.
 
 ## System Architecture
 
@@ -79,6 +81,17 @@ The platform consists of a camera-control system, independent Python programs fo
 
 The camera scan and LED vision programs communicate with the IOC through PyEpics to request image acquisitions and publish their results. Both analyze images saved by the camera server rather than accessing the camera directly. The image publisher also reads the latest saved image, but transfers its pixel data separately through PVAccess for display in Phoebus.
 
+The separately tested areaDetector path is:
+
+```text
+IMX219 → Picamera2 → Python / PyEpics → NDDriverStdArrays (STDARRAYS)
+       → NDArray → NDPluginStdArrays (IMAGE1)
+       → ca://AD:Image1:ArrayData → Phoebus
+```
+
+This is a single-frame proof of concept, not yet a replacement for the StreamDevice camera-control and LED-monitoring workflow.
+
+
 ### Camera control and communication
 
 The Python camera server (`acquisition/picamera2_server.py`) manages the IMX219 camera through Picamera2 and libcamera. It handles camera initialization, streaming, exposure and gain settings, and image acquisition.
@@ -109,9 +122,16 @@ Phoebus displays the image through its Image widget. Image pixels are transferre
 
 The current implementation displays acquired images rather than continuous live video. Both the camera scanner and LED monitor use saved images for analysis.
 
+### areaDetector image acquisition
+
+The separate `acquisition/tests/test_areadetector_image.py` program configures the areaDetector IOC through PyEpics, captures one 320 × 240 RGB frame directly from Picamera2, and transfers its 230,400 byte elements through Channel Access. `NDDriverStdArrays` creates the NDArray, and `NDPluginStdArrays` publishes the output waveform for Phoebus. The test does not save an intermediate JPEG.
+
+The IOC's acquisition mode is set to Continuous so it can accept successive image writes, but the Python test currently captures **one frame per run**. Image analysis with areaDetector plugins and sustained streaming performance have not yet been tested.
+
+
 ### Design approach
 
-The system separates camera hardware control, automated measurements, image processing, and visualization into independent programs. The camera server remains the only process accessing the physical IMX219 camera, while the scan and vision programs communicate through the existing EPICS IOC.
+The system separates camera hardware control, automated measurements, image processing, and visualization into independent programs. In the StreamDevice workflow, the camera server is the process accessing the physical IMX219, while the scan and vision programs communicate through the existing EPICS IOC. The separate areaDetector test accesses the camera directly and should not run at the same time as the camera server or another camera-using process.
 
 This arrangement allows measurement and vision functionality to be developed and tested independently without changing the underlying camera-control interface.
 
@@ -163,6 +183,21 @@ The waveform records use `FTVL=DOUBLE`, `NELM=100`, and `NORD` to track valid el
 
 These are soft IOC records updated by `vision/led_monitor.py` through PyEpics. No vision-specific StreamDevice commands or additional camera TCP connection are required. Vision monitoring waits for an active scan to complete before disabling scan mode and starting acquisition; new scans are prevented while vision monitoring is enabled. Both directions were tested in the current setup.
 
+### areaDetector image PVs
+
+| PV | Purpose |
+|---|---|
+| `AD:Input:ArrayIn` | Input waveform receiving flattened image bytes |
+| `AD:Input:Dimensions` | Driver array dimensions, configured as `[3, 320, 240]` |
+| `AD:Input:Acquire` | Enable acceptance of image arrays |
+| `AD:Input:ImageMode` | Select acquisition mode |
+| `AD:Input:ArrayCounter_RBV` | Input array count |
+| `AD:Image1:EnableCallbacks` | Enable output plugin callbacks |
+| `AD:Image1:ArrayCounter_RBV` | Output plugin array count |
+| `AD:Image1:ArrayData` | Image waveform used by Phoebus |
+
+These PVs belong to the separate areaDetector IOC, not the StreamDevice camera IOC.
+
 ## Phoebus Displays
 
 The version-controlled displays are in `phoebus/`:
@@ -170,6 +205,7 @@ The version-controlled displays are in `phoebus/`:
 - `epics_Camera_vision_main.bob` — main camera controls, LED vision-monitoring controls and indicators, and navigation to the scan displays.
 - `epics_Camera_vision_scan_exposure.bob` — exposure scan configuration and exposure–intensity plot.
 - `epics_Camera_vision_scan_gain.bob` — gain scan configuration and gain–intensity plot.
+- `epics_Camera_vision_areadetector.bob` — separate 320 × 240 RGB image display using `ca://AD:Image1:ArrayData`.
 
 The main display provides separate actions for exposure and gain scanning. These select `CAM:ScanType` and open the corresponding scan display. It also provides LED vision-monitoring controls and detected-status visualization. The scan plots use PVAccess waveform PVs, and the acquired-image widget requires the independent `pva_image_publisher.py` process.
 
@@ -218,6 +254,18 @@ Enable `CAM:VisionEnable` from the main Phoebus display, or use `caput CAM:Visio
 
 For a scan, use the main Phoebus display to open the exposure or gain scan window, set the corresponding start/end values and point count, enable scan mode, and issue Start Scan. The scan program ensures the camera is streaming and waits for the applied setting before acquisition. It saves JPEG/JSON acquisitions, writes scan CSV results under `data/scan/`, and updates the IOC result PVs point by point. The plotted X values come from the metadata associated with each acquired image, not merely the requested setting. Stop Scan requests a cooperative interruption; the Stop PV is not automatically reset after interruption.
 
+### Running the areaDetector single-frame test
+
+This is a separate workflow from the StreamDevice camera server. First start the areaDetector IOC using its `iocBoot/iocareadetector_camera/st.cmd`, as described in the [areaDetector IOC guide](docs/areadetector_ioc.md). From the repository root, with the camera available:
+
+```bash
+source .venv/bin/activate
+export EPICS_CA_MAX_ARRAY_BYTES=1000000
+python acquisition/tests/test_areadetector_image.py
+```
+
+The test configures the IOC's image format, dimensions, callbacks, and acquisition mode, then captures and publishes one RGB frame. Open `phoebus/epics_Camera_vision_areadetector.bob` to view the result. Do not run the Picamera2 TCP camera server or VLC camera capture simultaneously with this test.
+
 ## Data and Repository Structure
 
 ```text
@@ -228,6 +276,7 @@ camera_vision_epics/
 │   ├── picamera2_server.py
 │   ├── pva_image_publisher.py
 │   ├── tests/test_camera_acquisition.py
+│   ├── tests/test_areadetector_image.py
 │   └── images/                       # Generated JPEG/JSON files
 ├── automation/
 │   └── camera_scan.py
@@ -242,7 +291,8 @@ camera_vision_epics/
 ├── phoebus/
 │   ├── epics_Camera_vision_main.bob
 │   ├── epics_Camera_vision_scan_exposure.bob
-│   └── epics_Camera_vision_scan_gain.bob
+│   ├── epics_Camera_vision_scan_gain.bob
+│   └── epics_Camera_vision_areadetector.bob
 ├── data/
 │   ├── scan/                         # Generated CSV data, ignored by Git
 │   └── vision/                       # Generated diagnostic images, ignored by Git
@@ -250,9 +300,12 @@ camera_vision_epics/
 │   ├── implementation_and_results.md
 │   ├── epics_setup.md
 │   ├── streamdevice_ioc.md
+│   ├── areadetector_ioc.md
 │   ├── troubleshooting.md
 │   └── notes/                        # Focused technical learning notes
-└── epics/streamdevice_camera/streamdevice_camera_ioc/
+└── epics/
+    ├── streamdevice_camera/streamdevice_camera_ioc/
+    └── areadetector_camera/areadetector_camera_ioc/
 ```
 
 The repository is organized into separate directories for camera control, EPICS integration, automated scanning, image processing, hardware experiments, Phoebus displays, and documentation. Python source code and configuration files are version-controlled, while generated data, including acquired JPEG images, JSON metadata, scan results, and vision-analysis outputs, are stored separately and excluded from Git.
@@ -264,12 +317,13 @@ The repository is organized into separate directories for camera control, EPICS 
 - The image publisher transfers a reduced-resolution RGB array, not full-resolution files or live video. 
 - File-based scan and vision analysis currently require access to JPEG/JSON files on the Raspberry Pi. Remote file transfer and portable dataset paths are not implemented.
 - LED recognition uses periodic still-image acquisition approximately every three seconds, not continuous frame processing. Changes can be detected only after a new acquisition and analysis; short-lived states may be missed. HSV thresholds were tested in a controlled scene and are not yet validated against arbitrary backgrounds or LED absence.
+- The areaDetector implementation has been verified for single-frame RGB transfer and display only. Sustained frame rate, transfer latency, CPU/memory usage, and areaDetector-based LED analysis have not yet been measured or implemented.
 
 
 ## Possible Future Extensions
 
 - Investigate continuous frame-based LED recognition to reduce the delay from periodic still-image acquisition.
-- Explore a separate areaDetector-based implementation, including a suitable IMX219 driver, NDArray transport, and image-processing plugins, and compare it with the current StreamDevice approach.
+- Extend the verified areaDetector single-frame test to repeated acquisition; measure transfer rate and latency, and evaluate suitable NDArray processing plugins before comparing it with the StreamDevice workflow.
 - Extend the visual LED status monitoring with a physical buzzer alarm and investigate hand-gesture recognition.
 - Revisit controlled camera characterization, including ROI, gain, noise, uniformity, and potentially raw-sensor measurements.
 
@@ -277,6 +331,8 @@ The repository is organized into separate directories for camera control, EPICS 
 
 - [Implementation and Results](docs/implementation_and_results.md) — Development history, experimental milestones, and verified outcomes.
 - [StreamDevice Camera IOC](docs/streamdevice_ioc.md) — IOC, database, protocol, communication, and integration details.
+- [areaDetector Camera IOC](docs/areadetector_ioc.md) — Separate areaDetector IOC, image-array transfer, and Phoebus setup.
+- [areaDetector Image Test Note](docs/notes/test_areadetector_image.md) — Explanation of the single-frame Python acquisition test.
 - [EPICS Environment Setup](docs/epics_setup.md) — Installation and build configuration.
 - [Troubleshooting](docs/troubleshooting.md) — Observed problems, resolutions, and open issues.
 - [Technical Notes](docs/notes/) — Individual camera, EPICS, Python, image-publishing, touch/LED control, and vision-monitoring concepts.
