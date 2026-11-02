@@ -1,11 +1,11 @@
 # Implementation and Results
 
 **EPICS-Controlled Camera Characterization and Vision Platform**  
-**Development record through 30 October 2026**
+**Development record through 2 November 2026**
 
-This document records the implementation stages, design decisions, tests and observed results of the project. It complements the [project overview](../README.md), the [StreamDevice IOC implementation guide](streamdevice_ioc.md), and the [troubleshooting record](troubleshooting.md). Earlier experiments are retained as historical results even where their scripts have since been retired.
+This document records the implementation stages, design decisions, tests and observed results of the project. It complements the [project overview](../README.md), the [StreamDevice IOC implementation guide](streamdevice_ioc.md), the [areaDetector IOC implementation guide](areadetector_ioc.md), and the [troubleshooting record](troubleshooting.md). Earlier experiments are retained as historical results even where their scripts have since been retired.
 
-The active scan controller is `automation/camera_scan.py`; the separate `vision/led_monitor.py` now performs periodic camera-based RGB LED status recognition through EPICS. Exposure and gain scans, LED status publication, and Phoebus visualization have been exercised successfully. Broader reliability and performance testing remains open.
+The active scan controller is `automation/camera_scan.py`; the separate `vision/led_monitor.py` now performs periodic camera-based RGB LED status recognition through EPICS. Exposure and gain scans, LED status publication, and Phoebus visualization have been exercised successfully. A separate areaDetector IOC has also been tested for single-frame in-memory RGB acquisition and Phoebus display. Broader reliability and performance testing remains open.
 
 ---
 
@@ -330,13 +330,65 @@ LED monitoring controls and status visualization were added to the existing `pho
 
 The vision monitor does not continuously analyze camera frames. It requests a still-image acquisition approximately once every three seconds and processes the saved JPEG. LED state changes can therefore appear in EPICS and Phoebus only after a subsequent acquisition and processing cycle. The delay can approach the acquisition interval plus capture, file handling, analysis and EPICS update time; short-lived states can be missed between acquisitions. This is periodic monitoring, not continuous live vision processing.
 
+### 17. areaDetector-Based RGB Image Acquisition (2 November 2026)
+
+The periodic JPEG-based LED monitoring workflow described in Section 16 remains functional but acquires images approximately every three seconds. A separate areaDetector experiment was developed to test whether IMX219 frames could be passed directly from Picamera2 memory into an EPICS image-processing pipeline, without using the custom camera TCP server or saving intermediate JPEG files. This experiment does not replace the existing StreamDevice IOC or establish a faster LED detection rate.
+
+#### 17.1 Installing the areaDetector support modules
+
+The Raspberry Pi Zero 2 W environment uses EPICS Base R7.0.10, asyn R4-46 and the `linux-arm` architecture. ADCore R3-14 and NDDriverStdArrays R1-3 were installed under `~/projects/epics/support/modules/`, alongside the existing modules. ADCore was built with the system libxml2 development headers (`XML2_EXTERNAL=YES`, `XML2_INCLUDE=/usr/include/libxml2`). The installed `libADBase.so`, `libNDPlugin.so` and `libNDDriverStdArrays.so` were verified.
+
+The standard areaDetector database templates also require the `busy` record type. busy R1-7-4 was therefore installed and built. The IOC required both `busyRecord.dbd`, which defines the record type, and `busySupport.dbd`, which provides the `asynInt32` device support used by the template's `PreAllocBuffers` record. Adding only the record definition initially caused a database-loading error. The complete dependency installation and build configuration are documented in [EPICS Environment Setup](epics_setup.md).
+
+#### 17.2 Creating the separate areaDetector IOC
+
+A new IOC was generated using `makeBaseApp.pl` under `epics/areadetector_camera/areadetector_camera_ioc/`, keeping the existing StreamDevice IOC unchanged. Its build configuration links `NDDriverStdArrays`, `NDPlugin`, `ADBase`, `busy`, `asyn` and EPICS Base, and registers the corresponding database definitions.
+
+Five standard database templates were copied into the project and installed by its database Makefile: `NDDriverStdArrays.template`, `ADBase.template`, `NDArrayBase.template`, `NDStdArrays.template` and `NDPluginBase.template`. The two top-level templates include the others. This preserves the upstream record definitions in the repository while allowing IOC-specific configuration through macros.
+
+The startup script creates an input driver with `NDDriverStdArraysConfig("STDARRAYS", 10, 20000000, 0, 0)` and an output plugin with `NDStdArraysConfigure("IMAGE1", 2, 0, "STDARRAYS", 0, 0, 0, 0, 0, 1)`. The corresponding EPICS PV groups use `AD:Input:` and `AD:Image1:`. Both image waveforms were configured for 230,400 elements, sufficient for a 320 × 240 RGB frame, and the Channel Access array-size limit was increased to 1,000,000 bytes.
+
+The templates use `asynInt8ArrayOut` and `asynInt8ArrayIn` for waveform device support (`TYPE=Int8`, `FTVL=CHAR`); the NDArray pixel type itself is configured separately as `UInt8`. The output plugin also requires `NDARRAY_PORT=STDARRAYS` in its database macro configuration. These distinctions resolved initial startup errors involving nonexistent `asynUInt8Array` device support and an undefined upstream port.
+
+**Result:** The independent areaDetector IOC compiled and started with the input and output database records loaded and their asyn ports connected.
+
+#### 17.3 Picamera2 acquisition and Python-based IOC configuration
+
+The test program `acquisition/tests/test_areadetector_image.py` reuses the established camera lifecycle: `Picamera2(0)`, a 180-degree image transform, capture-request metadata, and explicit request release and camera cleanup. For this experiment it configures a 320 × 240 `RGB888` frame with automatic exposure enabled, acquires the image into a NumPy array using `request.make_array("main")`, and sends the flattened image through PyEpics to `AD:Input:ArrayIn`. No intermediate JPEG is saved. A colour-channel reversal was tested for the RGB1 display, and the resulting Phoebus image was visually checked after focusing the camera.
+
+The program was subsequently updated to configure the IOC through PyEpics before acquisition: image width and height, three dimensions (`[3, 320, 240]`), NDArray `UInt8` data type, RGB1 colour mode, callback and append modes, plugin callbacks, continuous image mode, and acquisition enable. This removes the need for manual `caput` setup after an IOC restart. The IOC must already be running, and the original Picamera2 TCP camera server must not simultaneously hold the camera.
+
+The driver stores the written dimensions internally even though `AD:Input:Dimensions_RBV` was observed to remain zero. `asynReport(1, "STDARRAYS")` confirmed `nDimensions: 3` and `array dimensions: [3 320 240]`. This readback was therefore not used as proof of configuration failure.
+
+#### 17.4 Verifying image transfer and acquisition state
+
+The first RGB test captured a `(240, 320, 3)` `uint8` frame, but the output plugin counter stayed at zero even though the Channel Access waveform write reported success. The input waveform reported `NORD=230400`, `NELM=230400`, and no alarm. Inspection of the NDDriverStdArrays source identified an acquisition-state guard: incoming array writes return successfully without generating an NDArray when `ADAcquire` is zero.
+
+After enabling `AD:Input:Acquire`, the output plugin counter increased from 0 to 1 and `AD:Image1:ArrayData.NORD` reported 230,400 elements. A later test appeared not to update the Phoebus image because the driver was in `Single` image mode and had returned to `Done`. Switching to `Continuous` allowed subsequent single-frame test runs to be accepted. This is a driver acquisition setting; the Python test itself still captures and transfers one frame per execution.
+
+When automatic IOC configuration was added to Python, `epics.caput(..., wait=True)` reported a failure when starting acquisition, although `Acquire_RBV` showed `Acquiring`, `ImageMode_RBV` showed `Continuous`, and the record had no alarm. The acquisition-start operation was changed to a non-waiting put followed by readback verification. The revised program was reported working.
+
+**Verified result:** A real 320 × 240 RGB image was captured with Picamera2, transferred in memory through PyEpics and NDDriverStdArrays, converted to an NDArray, received by NDPluginStdArrays, and exposed as a 230,400-element EPICS output waveform. The test program was subsequently verified with automatic IOC configuration.
+
+#### 17.5 Phoebus visualization and repository integration
+
+A separate Phoebus display, `phoebus/epics_Camera_vision_areadetector.bob`, was created rather than modifying the existing StreamDevice camera interface. Its Image widget uses `ca://AD:Image1:ArrayData`, 320 × 240 dimensions, `TYPE_RGB1`, and unsigned 8-bit display interpretation. An initial distorted display was corrected by matching the widget dimensions to the acquired frame. The colour display was then retested after updating the Python channel handling and ensuring that the IOC was accepting new frames. The operator subsequently adjusted the camera focus using VLC and reported satisfactory image display.
+
+The areaDetector IOC, Python test and Phoebus display were committed on `feature/areadetector-imx219` and merged into `main` through pull request #1 (merge commit `578671b`). The feature branch was subsequently removed after synchronization.
+
+**Result:** Single-frame RGB acquisition, EPICS image transfer and Phoebus visualization were demonstrated without a custom areaDetector camera driver or intermediate JPEG files.
+
+#### 17.6 Current scope and limitations
+
+This experiment verifies one image per Python test execution, even though the IOC is placed in Continuous acquisition mode. It does not yet demonstrate a continuous Picamera2-to-areaDetector frame stream, measure frame-transfer throughput or end-to-end latency, or connect the areaDetector image pipeline to the existing LED classifier. The use of Channel Access waveforms introduces its own transfer overhead; the absence of the custom TCP camera protocol does not by itself establish a performance improvement. The StreamDevice-based scanning and periodic LED-monitoring workflows remain separate and unchanged.
+
 ### Possible Future Extensions
 
 The following are exploratory options rather than scheduled implementation work:
 
-- Perform in-memory image acquisition and intensity analysis without saving every frame.
-- Explore continuous frame-based LED recognition to reduce detection latency and avoid saving a JPEG for every monitoring cycle.
-- Investigate a separate areaDetector-based IMX219 implementation and its NDArray/plugin pipeline; compare its acquisition and processing path with the current StreamDevice/Python TCP approach. Removing the custom TCP path alone does not guarantee lower latency.
+- Extend the verified areaDetector single-frame path to repeated in-memory acquisition and measure frame rate, transfer latency, CPU usage and memory consumption on the Raspberry Pi Zero 2 W.
+- Investigate continuous frame-based LED recognition using the areaDetector pipeline and compare its response time with the existing approximately three-second JPEG-based monitoring cycle.
+- Explore areaDetector ROI and statistics plugins, or Python-side analysis of incoming frames, for image processing without saving every frame.
 - Consider a physical buzzer driven by the detected alarm state after additional validation.
 - Extend image processing and analysis beyond image-wide mean grayscale intensity.
 - Improve communication recovery and synchronization across IOC or camera-server disconnects.
