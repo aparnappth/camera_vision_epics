@@ -23,7 +23,7 @@
   <widget type="label" version="2.0.0">
     <name>Label</name>
     <text>Area detector Image</text>
-    <x>220</x>
+    <x>180</x>
     <y>50</y>
     <width>410</width>
     <height>40</height>
