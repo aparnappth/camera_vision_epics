@@ -2,7 +2,7 @@
 
 This document records problems encountered during development of the EPICS-controlled camera platform, how they were investigated, and which issues remain open.
 
-For installation instructions, see [EPICS Environment Setup](epics_setup.md). For the IOC implementation, see [StreamDevice Camera IOC](streamdevice_ioc.md).
+For installation instructions, see [EPICS Environment Setup](epics_setup.md). For IOC implementation, see [StreamDevice Camera IOC](streamdevice_ioc.md) and [areaDetector Camera IOC](areadetector_ioc.md).
 
 ## 1. StreamDevice Example IOC Linker Error
 
@@ -1362,8 +1362,366 @@ This is periodic still-image monitoring, **not continuous frame processing**. A 
 
 **Possible extensions (not yet implemented)**
 
-Investigate direct frame-based analysis and evaluate whether a suitable areaDetector camera driver and NDArray/plugin pipeline can support more frequent processing without the current repeated JPEG workflow. areaDetector does not automatically guarantee lower latency; feasibility depends on the IMX219 driver and processing architecture. A physical buzzer alarm remains a separate possible extension.
+**Update (2 November 2026):** A separate areaDetector IOC using NDDriverStdArrays and NDPluginStdArrays has now been implemented and tested with one 320 × 240 RGB frame from Picamera2, transferred directly from memory and displayed in Phoebus. Continuous frame acquisition, LED recognition through this pipeline, and measured latency improvements remain untested. areaDetector does not automatically guarantee lower latency. A physical buzzer alarm remains a separate possible extension.
 
 ---
 
-**Documentation status (30 October 2026):** The standalone touch-controlled RGB LED, experimental HSV-based colour recognition, periodic EPICS LED monitoring, automatic-exposure activation, Phoebus status visualization and scan/vision coordination have been exercised successfully in the reported tests. The main vision limitation is detection latency from approximately three-second still-image acquisition. Colour-classification generalization, LED-absence detection, shared-TCP message ordering, reconnection handling and broader display-performance testing remain open investigations.
+## 57. areaDetector Database Loading Failed: Missing `busy` Record Type — 2 November 2026
+
+**Symptom**
+
+The new areaDetector IOC started, but loading either `NDDriverStdArrays.template` or `NDStdArrays.template` failed:
+
+```text
+ERROR: Record type 'busy' for record 'AD:Input:AcquireBusy' not found
+ERROR: Failed to load '../../db/NDDriverStdArrays.template'
+```
+
+The output template produced the corresponding `AD:Image1:AcquireBusy` error. `iocInit()` still completed, but that did **not** mean the records were loaded.
+
+**Cause**
+
+Both top-level areaDetector templates include `NDArrayBase.template`, which defines `busy` records. The EPICS Base installation did not provide this additional record type.
+
+**Resolution**
+
+The EPICS busy R1-7-4 support module was installed and built separately under `~/projects/epics/support/modules/busy`. Its location was added to the dependency configuration. The IOC linked the `busy` library and initially included `busyRecord.dbd` to define the record type.
+
+**Verification**
+
+```bash
+ls ~/projects/epics/support/modules/busy/lib/linux-arm/libbusy.so
+ls ~/projects/epics/support/modules/busy/dbd/busyRecord.dbd
+```
+
+This resolved the missing record-type error, but a separate device-support error remained (Section 55). Do not interpret successful `iocInit()` alone as evidence that all database records loaded.
+
+## 58. areaDetector `busy` Record Had No `asynInt32` Device Support
+
+**Symptom**
+
+After installing busy, IOC startup reported:
+
+```text
+ERROR: Can't set 'AD:Input:PreAllocBuffers.DTYP' to 'asynInt32'
+no such device support for 'busy' record type
+```
+
+The same occurred for `AD:Image1:PreAllocBuffers`.
+
+**Cause**
+
+`busyRecord.dbd` supplies the record definition, but the standard areaDetector template also needs asyn device support for the `busy` record. Searching asyn's own DBD files found no `device(busy, ...)` entry. The needed registration was instead present in the installed busy module's `busySupport.dbd`:
+
+```text
+device(busy,INST_IO,asynBusyInt32,"asynInt32")
+```
+
+**Resolution**
+
+The areaDetector IOC's application Makefile includes both:
+
+```makefile
+areadetector_camera_DBD += busyRecord.dbd
+areadetector_camera_DBD += busySupport.dbd
+```
+
+and links the busy library:
+
+```makefile
+areadetector_camera_LIBS += busy
+```
+
+Rebuild the IOC, then verify:
+
+```bash
+grep 'device(busy' dbd/areadetector_camera.dbd
+```
+
+The copied standard areaDetector templates were retained unchanged.
+
+## 59. Unsupported `asynUInt8ArrayIn/Out` Device Support
+
+**Symptom**
+
+Database loading reported:
+
+```text
+no such device support for 'waveform' record type
+Did you mean "asynInt8ArrayOut"?
+```
+
+The output plugin similarly rejected `asynUInt8ArrayIn`.
+
+**Cause**
+
+The templates construct their waveform device-support names using the `TYPE` macro. `TYPE=UInt8` requested device-support names not registered by the installed asyn build, even though `UInt8` is a valid areaDetector NDArray data type.
+
+**Resolution**
+
+Both template loads use:
+
+```text
+TYPE=Int8,FTVL=CHAR
+```
+
+The Python client preserves the pixel byte patterns when passing the flattened NumPy `uint8` array through the signed 8-bit waveform interface:
+
+```python
+pixels_int8 = pixels.view(np.int8)
+```
+
+Separately, the areaDetector driver is configured with `AD:Input:DataType = UInt8` for the NDArray. The waveform device-support type and NDArray pixel type serve different purposes. This correction was verified by successful 230,400-element image transfer.
+
+## 60. Undefined `NDARRAY_PORT` Prevented Plugin Connection
+
+**Symptom**
+
+During template loading:
+
+```text
+macLib: macro NDARRAY_PORT is undefined
+AD:Image1:NDArrayPort.VAL Has unexpanded macro
+```
+
+The IOC also reported:
+
+```text
+NDPluginDriver::connectToArrayPort ... port  not found
+```
+
+**Cause**
+
+`NDPluginBase.template` requires the `NDARRAY_PORT` macro to identify the upstream driver. Defining `PORT=IMAGE1` alone identifies the plugin's own asyn port, not its NDArray input.
+
+**Resolution**
+
+The `NDStdArrays.template` load includes:
+
+```text
+PORT=IMAGE1,NDARRAY_PORT=STDARRAYS
+```
+
+The driver itself is configured as `STDARRAYS`. After correction:
+
+```bash
+caget AD:Image1:NDArrayPort_RBV
+```
+
+reported `STDARRAYS`, and the plugin subsequently received image callbacks.
+
+## 61. `Dimensions_RBV` Remained Zero After Writing Valid RGB Dimensions
+
+**Symptom**
+
+The command:
+
+```bash
+caput -a AD:Input:Dimensions 3 3 320 240
+```
+
+updated the input waveform, but:
+
+```bash
+caget AD:Input:Dimensions_RBV
+```
+
+still returned ten zeros.
+
+**Investigation**
+
+In NDDriverStdArrays R1-3, `writeInt32Array()` handles the `NDDimensions` parameter by copying the incoming values into the driver's internal `arrayDimensions_` array. The inspected code did not publish a corresponding array readback callback.
+
+**Verification**
+
+At the IOC shell:
+
+```text
+asynReport(1, "STDARRAYS")
+```
+
+reported:
+
+```text
+nDimensions:      3
+array dimensions: [3 320 240 ]
+```
+
+**Outcome**
+
+The driver had accepted the dimensions despite the zero waveform readback. `Dimensions_RBV` should not be used as the sole confirmation of the internal geometry in this tested version. The later successful NDArray transfer provided an additional functional check.
+
+## 62. RGB Waveform Write Succeeded but No NDArray Was Created
+
+**Symptom**
+
+The first Picamera2 test acquired a 320 × 240 RGB frame and PyEpics reported a successful `caput` of 230,400 elements. However:
+
+```text
+AD:Input:ArrayCounter_RBV      0
+AD:Image1:ArrayCounter_RBV     0
+AD:Input:NumElements_RBV       0
+AD:Image1:ArrayData.NORD       0
+```
+
+The input waveform itself had `NORD=230400`, `NELM=230400`, and no record alarm.
+
+**Cause confirmed from source**
+
+`NDDriverStdArrays::writeXXXArray()` begins with:
+
+```cpp
+getIntegerParam(ADAcquire, &acquire);
+if (!acquire) return asynSuccess;
+```
+
+The driver had `ACQUIRE=0`. It therefore returned success without allocating or publishing an NDArray.
+
+**Resolution**
+
+Enable acquisition before sending image data:
+
+```bash
+caput AD:Input:Acquire 1
+```
+
+After enabling acquisition, the Python test reported that the plugin counter increased from 0 to 1 and `AD:Image1:ArrayData.NORD` was 230400. A successful waveform write alone is not proof of completed NDArray processing.
+
+## 63. Only the First Image Updated: `Single` Acquisition Mode
+
+**Symptom**
+
+A second Python run reported a successful image write, but the input and output counters both remained at 1. Changing the RGB channel order appeared to have no effect in Phoebus.
+
+**Diagnosis**
+
+```bash
+caget AD:Input:Acquire_RBV
+caget AD:Input:ImageMode_RBV
+```
+
+returned:
+
+```text
+AD:Input:Acquire_RBV    Done
+AD:Input:ImageMode_RBV  Single
+```
+
+The driver had stopped acquisition after its first image.
+
+**Resolution**
+
+```bash
+caput AD:Input:ImageMode Continuous
+caput AD:Input:Acquire 1
+```
+
+With continuous acquisition enabled, subsequent single-frame test runs could update the image. This configures the IOC to keep accepting images; it does not make the Python test itself a continuous streaming program.
+
+## 64. PyEpics Put-Completion Timeout When Starting Continuous Acquisition
+
+**Symptom**
+
+After adding automatic IOC configuration to `acquisition/tests/test_areadetector_image.py`, the script raised:
+
+```text
+RuntimeError: Failed to write EPICS PV: AD:Input:Acquire
+```
+
+The helper used `epics.caput(..., wait=True, timeout=10)`.
+
+**Investigation**
+
+Despite the reported failure, subsequent checks showed:
+
+```text
+AD:Input:Acquire_RBV    Acquiring
+AD:Input:ImageMode_RBV  Continuous
+AD:Input:Acquire.STAT   NO_ALARM
+AD:Input:Acquire.SEVR   NO_ALARM
+```
+
+The command had taken effect; the observed failure concerned waiting for put completion, not failure to enter the acquiring state.
+
+**Resolution**
+
+Start acquisition with `wait=False`, then check `Acquire_RBV` for the expected state, allowing a short polling interval and timeout. This separates issuing a long-running acquisition command from waiting for acquisition to finish.
+
+The corrected Python test was reported working. Unlike `Dimensions_RBV`, `Acquire_RBV` was observed to reflect the actual driver acquisition state in these tests.
+
+## 65. Phoebus Image Display: Wrong Geometry and Colour Interpretation
+
+**Symptoms**
+
+The first areaDetector image appeared as coloured horizontal noise in Phoebus. After correcting the widget's dimensions, the scene became recognizable, but the colours initially appeared unusual. An attempted red/blue channel swap did not seem to change the displayed image.
+
+**Investigation and corrections**
+
+The Image widget had previously been used for a 100 × 100 PVAccess image. The new areaDetector waveform contains a 320 × 240 RGB1 image, or 230,400 elements. The widget was configured to use:
+
+| Property | Setting |
+|---|---|
+| PV | `ca://AD:Image1:ArrayData` |
+| Data Width | `320` |
+| Data Height | `240` |
+| Color Mode | `TYPE_RGB1` |
+| Unsigned Data | Enabled |
+| Auto-scale | Disabled |
+| Minimum / Maximum | `0` / `255` |
+
+The Python test also reversed the three Picamera2 array channels before flattening them for transfer. However, the first apparent lack of improvement was partly explained by the driver having returned to `Single` acquisition's stopped state: the displayed frame had not updated. Once the IOC was configured for continuous acquisition, a subsequent Phoebus image was reported to look correct after camera focusing.
+
+**Outcome**
+
+A recognizable RGB image was displayed in `phoebus/epics_Camera_vision_areadetector.bob`. This was a visual verification in the tested scene, not a calibrated colour-accuracy measurement. If colours are suspect again, first confirm the array counter increases before changing channel order.
+
+## 66. Channel Access Array Size for RGB Image Transfer
+
+**Requirement**
+
+A 320 × 240 RGB frame contains 230,400 byte elements. Both IOC and client must permit sufficiently large Channel Access arrays, and the input and output waveform capacities must accommodate them.
+
+**Configuration used**
+
+The IOC startup configuration uses an array-size limit of:
+
+```text
+EPICS_CA_MAX_ARRAY_BYTES=1000000
+```
+
+The Python environment sets the same value before importing PyEpics. The two database template loads use `NELEMENTS=230400`, with `TYPE=Int8,FTVL=CHAR`.
+
+**Verification**
+
+```bash
+caget AD:Input:ArrayIn.NELM
+caget AD:Input:ArrayIn.NORD
+caget AD:Image1:ArrayData.NORD
+```
+
+After a successful transfer, all three were reported as 230400. `NELM` is capacity; `NORD` is the number of elements currently held. An IOC restart resets manually written configuration PVs unless the Python setup routine is run again.
+
+## 67. Current areaDetector Test Scope and Remaining Checks
+
+**Verified on 2 November 2026**
+
+- The separate areaDetector IOC loaded the standard copied database templates after the busy and asyn device-support corrections.
+- Picamera2 acquired a 320 × 240, three-channel `uint8` image with automatic exposure.
+- Python transferred 230,400 elements to `NDDriverStdArrays` through Channel Access.
+- `NDPluginStdArrays` received the NDArray and exposed 230,400 output elements.
+- Phoebus displayed the image, and the camera was refocused using a separate VLC workflow.
+- The Python test subsequently configured the IOC PVs automatically and completed successfully.
+
+**Not yet verified**
+
+- Continuous frame acquisition and measured sustained frame rate or latency.
+- Long-duration memory, CPU, callback-queue, and dropped-frame behaviour on the Pi Zero 2 W.
+- Whether the areaDetector route reduces the approximately three-second LED-monitoring cycle in practice.
+- Robustness across IOC disconnects, acquisition failures, and changing image resolutions.
+- Quantitative RGB colour accuracy under controlled reference targets.
+
+The working test sends one frame per Python invocation. `ImageMode=Continuous` means the driver remains ready for subsequent arrays; it does not itself acquire frames from Picamera2.
+
+---
+
+**Documentation status (2 November 2026):** The StreamDevice, scanning, and LED-monitoring troubleshooting history in Sections 1–56 is retained. Sections 57–67 record the areaDetector IOC and single-frame RGB acquisition problems and their tested resolutions. Continuous acquisition, quantitative colour accuracy, latency, and reliability remain open investigations.
