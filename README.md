@@ -3,6 +3,7 @@
 An experimental camera-control and computer-vision platform built using a Raspberry Pi Zero 2 W, Sony IMX219 camera, and EPICS (Experimental Physics and Industrial Control System).
 
 The platform currently supports remote camera control, image acquisition, adjustment of camera settings, and automated exposure and gain scans to study the camera's response to different settings. It also demonstrates camera-based device status monitoring using computer vision. A touch-controlled RGB LED serves as a simulated device representing normal, warning, and fault conditions. The camera identifies these states by analyzing the LED colour, and the results are displayed through Phoebus, a graphical interface for controlling and monitoring the system through EPICS.
+
 A separate areaDetector experiment also demonstrates direct transfer of an IMX219 RGB frame into an EPICS NDArray pipeline and display in Phoebus, without saving an intermediate JPEG.
 
 ## Capabilities
