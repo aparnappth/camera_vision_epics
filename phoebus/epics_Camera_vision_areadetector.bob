@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<display version="2.0.0">
+  <widget type="image" version="2.0.0">
+    <name>Image</name>
+    <pv_name>AD:Image1:ArrayData</pv_name>
+    <x>220</x>
+    <y>140</y>
+    <width>321</width>
+    <height>240</height>
+    <data_width>320</data_width>
+    <data_height>240</data_height>
+    <color_mode>3</color_mode>
+    <unsigned>true</unsigned>
+    <autoscale>false</autoscale>
+  </widget>
+  <widget type="image" version="2.0.0">
+    <name>Image_1</name>
+    <x>540</x>
+    <y>270</y>
+    <width>1</width>
+    <height>1</height>
+  </widget>
+  <widget type="label" version="2.0.0">
+    <name>Label</name>
+    <text>Area detector Image</text>
+    <x>180</x>
+    <y>50</y>
+    <width>410</width>
+    <height>40</height>
+    <font>
+      <font family="Liberation Sans" style="BOLD" size="24.0">
+      </font>
+    </font>
+    <horizontal_alignment>1</horizontal_alignment>
+    <vertical_alignment>1</vertical_alignment>
+  </widget>
+</display>
