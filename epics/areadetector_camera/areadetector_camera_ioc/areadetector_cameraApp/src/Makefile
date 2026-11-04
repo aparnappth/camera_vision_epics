@@ -28,6 +28,9 @@ areadetector_camera_DBD += asyn.dbd
 areadetector_camera_DBD += ADSupport.dbd
 areadetector_camera_DBD += NDPluginSupport.dbd
 
+# Custom RGB analysis plugin
+areadetector_camera_DBD += NDPluginRGB.dbd
+
 # NDDriverStdArrays driver
 areadetector_camera_DBD += NDDriverStdArraysSupport.dbd
 
@@ -44,12 +47,17 @@ areadetector_camera_LIBS += busy
 # asyn support
 areadetector_camera_LIBS += asyn
 
+# Custom RGB analysis plugin implementation
+areadetector_camera_SRCS += NDPluginRGB.cpp
+
 # areadetector_camera_registerRecordDeviceDriver.cpp derives from areadetector_camera.dbd
 areadetector_camera_SRCS += areadetector_camera_registerRecordDeviceDriver.cpp
 
 # Build the main IOC entry point on workstation OSs.
 areadetector_camera_SRCS_DEFAULT += areadetector_cameraMain.cpp
 areadetector_camera_SRCS_vxWorks += -nil-
+
+
 
 # Add support from base/src/vxWorks if needed
 #areadetector_camera_OBJS_vxWorks += $(EPICS_BASE_BIN)/vxComLibrary
