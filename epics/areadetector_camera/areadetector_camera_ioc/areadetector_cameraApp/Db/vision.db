@@ -1,0 +1,201 @@
+
+# ==========================================
+# Vision processing database
+# ==========================================
+#
+# Input:
+# AD:RGB1:ColorCounts_RBV
+#
+# Array order:
+# [RedCount, YellowCount, GreenCount]
+#
+# Classification:
+# 0 = UNKNOWN / OFF
+# 1 = NORMAL  / Green
+# 2 = WARNING / Yellow
+# 3 = FAULT   / Red
+#
+# The RGB plugin performs HSV segmentation.
+# This database performs LED classification.
+#
+# ==========================================
+
+
+# ==========================================
+# Extract red pixel count
+# ==========================================
+
+record(subArray, "AD:Vision:Red")
+{
+    field(DESC, "Red pixel count")
+    field(DTYP, "Soft Channel")
+    field(INP, "AD:RGB1:ColorCounts_RBV CP")
+    field(FTVL, "LONG")
+    field(MALM, "3")
+    field(NELM, "1")
+    field(INDX, "0")
+    field(SCAN, "Passive")
+}
+
+
+# ==========================================
+# Extract yellow pixel count
+# ==========================================
+
+record(subArray, "AD:Vision:Yellow")
+{
+    field(DESC, "Yellow pixel count")
+    field(DTYP, "Soft Channel")
+    field(INP, "AD:RGB1:ColorCounts_RBV CP")
+    field(FTVL, "LONG")
+    field(MALM, "3")
+    field(NELM, "1")
+    field(INDX, "1")
+    field(SCAN, "Passive")
+}
+
+
+# ==========================================
+# Extract green pixel count
+# ==========================================
+
+record(subArray, "AD:Vision:Green")
+{
+    field(DESC, "Green pixel count")
+    field(DTYP, "Soft Channel")
+    field(INP, "AD:RGB1:ColorCounts_RBV CP")
+    field(FTVL, "LONG")
+    field(MALM, "3")
+    field(NELM, "1")
+    field(INDX, "2")
+    field(SCAN, "Passive")
+}
+
+
+# ==========================================
+# Total detected coloured pixels
+# ==========================================
+
+record(calc, "AD:Vision:Total")
+{
+    field(DESC, "Total coloured pixels")
+
+    field(INPA, "AD:Vision:Red.VAL CP")
+    field(INPB, "AD:Vision:Yellow.VAL CP")
+    field(INPC, "AD:Vision:Green.VAL CP")
+
+    field(CALC, "A+B+C")
+    field(PREC, "0")
+    field(SCAN, "Passive")
+}
+
+
+# ==========================================
+# Red / Green pixel ratio
+# ==========================================
+
+record(calc, "AD:Vision:RedGreenRatio")
+{
+    field(DESC, "Red to green pixel ratio")
+
+    field(INPA, "AD:Vision:Red.VAL CP")
+    field(INPB, "AD:Vision:Green.VAL CP")
+
+    field(CALC, "A/MAX(B,1)")
+    field(PREC, "4")
+    field(SCAN, "Passive")
+}
+
+
+# ==========================================
+# Yellow fraction
+# ==========================================
+
+record(calc, "AD:Vision:YellowFraction")
+{
+    field(DESC, "Yellow pixel fraction")
+
+    field(INPA, "AD:Vision:Red.VAL CP")
+    field(INPB, "AD:Vision:Yellow.VAL CP")
+    field(INPC, "AD:Vision:Green.VAL CP")
+
+    field(CALC, "B/MAX(A+B+C,1)")
+    field(PREC, "4")
+    field(SCAN, "Passive")
+}
+
+
+# ==========================================
+# LED status classification
+# ==========================================
+#
+# Classification rules:
+#
+# Total < 1000:
+#     UNKNOWN
+#
+# R/G > 20 and YellowFraction < 0.05:
+#     FAULT
+#
+# YellowFraction > 0.10:
+#     WARNING
+#
+# R/G < 0.2 and YellowFraction < 0.02:
+#     NORMAL
+#
+# Otherwise:
+#     UNKNOWN
+#
+# EPICS CALC uses conditional expressions.
+# ==========================================
+
+record(calc, "AD:Vision:LEDStatus")
+{
+    field(DESC, "LED status classification")
+
+    field(INPA, "AD:Vision:Red.VAL CP")
+    field(INPB, "AD:Vision:Yellow.VAL CP")
+    field(INPC, "AD:Vision:Green.VAL CP")
+
+    field(CALC, "A+B+C<1000?0:(A/MAX(C,1)>20&&B/(A+B+C)<0.05)?3:(B/(A+B+C)>0.10)?2:(A/MAX(C,1)<0.2&&B/(A+B+C)<0.02)?1:0")
+
+    field(PREC, "0")
+    field(SCAN, "Passive")
+
+    # Alarm thresholds
+    # FAULT (3) -> MAJOR
+    # WARNING (2) -> MINOR
+    # UNKNOWN (0) -> handled separately
+
+    field(HIHI, "2.5")
+    field(HHSV, "MAJOR")
+
+    field(HIGH, "1.5")
+    field(HSV, "MINOR")
+
+    field(HYST, "0")
+}
+
+
+# ==========================================
+# Human-readable LED state# ==========================================
+
+record(mbbi, "AD:Vision:LEDState")
+{
+    field(DESC, "LED state for Phoebus")
+
+    field(DTYP, "Soft Channel")
+    field(INP, "AD:Vision:LEDStatus.VAL CP")
+
+    field(ZRST, "UNKNOWN")
+    field(ONST, "NORMAL")
+    field(TWST, "WARNING")
+    field(THST, "FAULT")
+
+    field(ZRVL, "0")
+    field(ONVL, "1")
+    field(TWVL, "2")
+    field(THVL, "3")
+
+    field(SCAN, "Passive")
+}
