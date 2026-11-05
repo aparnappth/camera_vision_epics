@@ -3,8 +3,8 @@
   <widget type="image" version="2.0.0">
     <name>Image</name>
     <pv_name>AD:Image1:ArrayData</pv_name>
-    <x>220</x>
-    <y>140</y>
+    <x>130</x>
+    <y>160</y>
     <width>321</width>
     <height>240</height>
     <data_width>320</data_width>
@@ -23,8 +23,8 @@
   <widget type="label" version="2.0.0">
     <name>Label</name>
     <text>Area detector Image</text>
-    <x>180</x>
-    <y>50</y>
+    <x>250</x>
+    <y>40</y>
     <width>410</width>
     <height>40</height>
     <font>
@@ -33,5 +33,47 @@
     </font>
     <horizontal_alignment>1</horizontal_alignment>
     <vertical_alignment>1</vertical_alignment>
+  </widget>
+  <widget type="multi_state_led" version="2.0.0">
+    <name>LED (Multi State)</name>
+    <pv_name>AD:Vision:LEDState</pv_name>
+    <x>590</x>
+    <y>220</y>
+    <width>70</width>
+    <height>71</height>
+    <states>
+      <state>
+        <value>0</value>
+        <label>Unknown</label>
+        <color>
+          <color name="Off" red="60" green="100" blue="60">
+          </color>
+        </color>
+      </state>
+      <state>
+        <value>1</value>
+        <label>Normal</label>
+        <color>
+          <color name="On" red="0" green="255" blue="0">
+          </color>
+        </color>
+      </state>
+      <state>
+        <value>2</value>
+        <label>Warning</label>
+        <color>
+          <color name="MINOR" red="255" green="128" blue="0">
+          </color>
+        </color>
+      </state>
+      <state>
+        <value>3</value>
+        <label>Fault</label>
+        <color>
+          <color name="MAJOR" red="255" green="0" blue="0">
+          </color>
+        </color>
+      </state>
+    </states>
   </widget>
 </display>

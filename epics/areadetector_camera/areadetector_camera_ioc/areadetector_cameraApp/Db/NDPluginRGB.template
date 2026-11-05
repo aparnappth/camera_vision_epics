@@ -1,0 +1,127 @@
+
+# ==========================================
+# NDPluginRGB database template
+# ==========================================
+#
+# P    = EPICS prefix
+# R    = Plugin record prefix
+# PORT = asyn port name
+#
+# The plugin receives RGB1 NDArrays and
+# publishes RGB and HSV measurements.
+#
+# ==========================================
+
+include "NDPluginBase.template"
+
+
+# ==========================================
+# Frame validation
+# ==========================================
+
+record(bi, "$(P)$(R)ValidFrame_RBV")
+{
+    field(DESC, "RGB input frame valid")
+    field(DTYP, "asynInt32")
+    field(INP, "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))RGB_VALID_FRAME")
+    field(ZNAM, "Invalid")
+    field(ONAM, "Valid")
+    field(SCAN, "I/O Intr")
+}
+
+record(longin, "$(P)$(R)ValidCount_RBV")
+{
+    field(DESC, "Valid RGB frame count")
+    field(DTYP, "asynInt32")
+    field(INP, "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))RGB_VALID_COUNT")
+    field(SCAN, "I/O Intr")
+}
+
+record(longin, "$(P)$(R)InvalidCount_RBV")
+{
+    field(DESC, "Invalid RGB frame count")
+    field(DTYP, "asynInt32")
+    field(INP, "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))RGB_INVALID_COUNT")
+    field(SCAN, "I/O Intr")
+}
+
+
+# ==========================================
+# RGB channel statistics
+# ==========================================
+
+record(ai, "$(P)$(R)RedMean_RBV")
+{
+    field(DESC, "Mean red channel intensity")
+    field(DTYP, "asynFloat64")
+    field(INP, "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))RGB_RED_MEAN")
+    field(PREC, "3")
+    field(SCAN, "I/O Intr")
+}
+
+record(ai, "$(P)$(R)GreenMean_RBV")
+{
+    field(DESC, "Mean green channel intensity")
+    field(DTYP, "asynFloat64")
+    field(INP, "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))RGB_GREEN_MEAN")
+    field(PREC, "3")
+    field(SCAN, "I/O Intr")
+}
+
+record(ai, "$(P)$(R)BlueMean_RBV")
+{
+    field(DESC, "Mean blue channel intensity")
+    field(DTYP, "asynFloat64")
+    field(INP, "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))RGB_BLUE_MEAN")
+    field(PREC, "3")
+    field(SCAN, "I/O Intr")
+}
+
+
+# ==========================================
+# HSV colour segmentation
+# ==========================================
+
+record(longin, "$(P)$(R)RedCount_RBV")
+{
+    field(DESC, "Red pixel count")
+    field(DTYP, "asynInt32")
+    field(INP, "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))RGB_RED_COUNT")
+    field(SCAN, "I/O Intr")
+}
+
+record(longin, "$(P)$(R)YellowCount_RBV")
+{
+    field(DESC, "Yellow pixel count")
+    field(DTYP, "asynInt32")
+    field(INP, "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))RGB_YELLOW_COUNT")
+    field(SCAN, "I/O Intr")
+}
+
+record(longin, "$(P)$(R)GreenCount_RBV")
+{
+    field(DESC, "Green pixel count")
+    field(DTYP, "asynInt32")
+    field(INP, "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))RGB_GREEN_COUNT")
+    field(SCAN, "I/O Intr")
+}
+
+record(longin, "$(P)$(R)ColoredCount_RBV")
+{
+    field(DESC, "Total detected colour pixels")
+    field(DTYP, "asynInt32")
+    field(INP, "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))RGB_COLORED_COUNT")
+    field(SCAN, "I/O Intr")
+}
+
+# Counts from one processed RGB frame
+# Element order: Red, Yellow, Green
+record(waveform, "$(P)$(R)ColorCounts_RBV")
+{
+    field(DESC, "RGB colour pixel counts")
+    field(DTYP, "asynInt32ArrayIn")
+    field(INP, "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))RGB_COLOR_COUNTS")
+    field(FTVL, "LONG")
+    field(NELM, "3")
+    field(SCAN, "I/O Intr")
+}

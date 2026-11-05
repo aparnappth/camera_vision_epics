@@ -19,6 +19,13 @@ DB += NDArrayBase.template
 DB += NDDriverStdArrays.template
 DB += NDPluginBase.template
 DB += NDStdArrays.template
+DB += NDROI.template
+DB += NDStats.template
+# Custom RGB analysis plugin
+DB += NDPluginRGB.template
+# Vision processing records
+DB += vision.db
+
 #----------------------------------------------------
 # If <anyname>.db template is not named <anyname>*.template add
 # <anyname>_template = <templatename>
