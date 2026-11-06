@@ -1362,7 +1362,7 @@ This is periodic still-image monitoring, **not continuous frame processing**. A 
 
 **Possible extensions (not yet implemented)**
 
-**Update (2 November 2026):** A separate areaDetector IOC using NDDriverStdArrays and NDPluginStdArrays has now been implemented and tested with one 320 × 240 RGB frame from Picamera2, transferred directly from memory and displayed in Phoebus. Continuous frame acquisition, LED recognition through this pipeline, and measured latency improvements remain untested. areaDetector does not automatically guarantee lower latency. A physical buzzer alarm remains a separate possible extension.
+**Historical update (2 November 2026):** The initial areaDetector IOC demonstrated a single 320 × 240 RGB frame from Picamera2 through NDDriverStdArrays and NDPluginStdArrays. **Subsequent update (4–5 November 2026):** Continuous acquisition, NDPluginRGB colour segmentation, EPICS LED classification, and Phoebus monitoring were implemented and functionally tested. Quantitative latency improvement remains unverified. A physical buzzer remains a possible extension.
 
 ---
 
@@ -1701,7 +1701,7 @@ caget AD:Image1:ArrayData.NORD
 
 After a successful transfer, all three were reported as 230400. `NELM` is capacity; `NORD` is the number of elements currently held. An IOC restart resets manually written configuration PVs unless the Python setup routine is run again.
 
-## 67. Current areaDetector Test Scope and Remaining Checks
+## 67. Original areaDetector Test Scope and Remaining Checks (2 November 2026)
 
 **Verified on 2 November 2026**
 
@@ -1712,7 +1712,7 @@ After a successful transfer, all three were reported as 230400. `NELM` is capaci
 - Phoebus displayed the image, and the camera was refocused using a separate VLC workflow.
 - The Python test subsequently configured the IOC PVs automatically and completed successfully.
 
-**Not yet verified**
+**Not yet verified at this 2 November checkpoint**
 
 - Continuous frame acquisition and measured sustained frame rate or latency.
 - Long-duration memory, CPU, callback-queue, and dropped-frame behaviour on the Pi Zero 2 W.
@@ -1724,4 +1724,225 @@ The working test sends one frame per Python invocation. `ImageMode=Continuous` m
 
 ---
 
-**Documentation status (2 November 2026):** The StreamDevice, scanning, and LED-monitoring troubleshooting history in Sections 1–56 is retained. Sections 57–67 record the areaDetector IOC and single-frame RGB acquisition problems and their tested resolutions. Continuous acquisition, quantitative colour accuracy, latency, and reliability remain open investigations.
+**Historical documentation status (2 November 2026):** Sections 1–56 retain StreamDevice, scanning, and LED-monitoring troubleshooting history; Sections 57–67 record the original areaDetector IOC and single-frame RGB acquisition. Sections 68 onward document subsequent continuous acquisition and RGB vision work. Quantitative colour accuracy, latency, and long-duration reliability remain open investigations.
+
+
+## 68. Continuous Image Transfer Failed at `AD:Input:ArrayIn` — 4 November 2026
+
+**Observed symptom**
+
+The continuous Picamera2 test started, transferred two frames, and then raised:
+
+```text
+RuntimeError: Failed to write EPICS PV: AD:Input:ArrayIn
+```
+
+The failure was reported by `acquisition/tests/test_areadetector_continuous.py` while writing the flattened RGB byte array. This error alone does not identify whether the immediate cause was a Channel Access timeout, connection loss, or a stalled downstream processing thread.
+
+**Investigation and outcome**
+
+An IOC-side error was also observed during development (Section 69). After correcting the plugin's NDArray ownership handling and restarting the IOC, subsequent continuous tests reported increasing valid-frame counters and colour measurements. Do not assume that every future `ArrayIn` write failure has the same cause: inspect IOC messages, acquisition state, callback enable settings, and Channel Access array-size limits.
+
+Useful checks:
+
+```bash
+caget AD:Input:Acquire_RBV
+caget AD:Input:ArrayCallbacks_RBV
+caget AD:Input:ArrayCounter_RBV
+caget AD:RGB1:EnableCallbacks_RBV
+caget AD:RGB1:ValidCount_RBV
+```
+
+## 69. NDArray Reference Count Became Negative and a Plugin Thread Suspended
+
+**Observed IOC error**
+
+```text
+NDArrayPool:release ERROR, reference count < 0 pArray=0x753308b0
+CRITICAL ERROR Thread IMAGE1_Plugin_1 ... can't proceed, suspending.
+```
+
+**Investigation**
+
+During development of the custom `NDPluginRGB`, an early implementation called `endProcessCallbacks()` using the incoming `NDArray` even though the plugin was intended only to calculate scalar and array measurements. This was identified as an incorrect ownership/forwarding operation for the chosen implementation.
+
+**Correction and verification**
+
+The measurement-only plugin was changed to perform `beginProcessCallbacks(pArray)`, calculate statistics and publish asyn parameter callbacks **without** calling `endProcessCallbacks()` on the input or manually releasing the incoming `pArray`. The upstream callback infrastructure retains responsibility for its input-array lifecycle. Subsequent tests showed increasing `AD:RGB1:ValidCount_RBV` with no repeat of the reported negative-reference-count error.
+
+This correction is specific to the current measurement-only plugin design. A future plugin that publishes a new output NDArray must implement appropriate allocation, ownership, and callback handling rather than copying this rule without review. Restart the IOC after a critical suspended-thread error; do not treat that IOC process as healthy.
+
+## 70. ROI and Statistics Plugins Did Not Produce Measurements
+
+**Symptoms**
+
+During exploratory standard-plugin testing, `AD:ROI1:ArrayCounter_RBV` and `AD:Stats1:ArrayCounter_RBV` initially remained zero. The configuration showed `AD:ROI1:EnableCallbacks_RBV` as `Disable`, while `AD:Stats1:NDArrayPort_RBV` pointed to `ROI1`. Mean, minimum, and maximum statistics therefore remained zero.
+
+**Resolution and observation**
+
+After enabling the ROI callbacks, both counters advanced and statistics became nonzero. For example, a reported statistics frame had mean `153.317`, minimum `0`, and maximum `255`. The ROI dimension size fields had large defaults, which were investigated during configuration.
+
+However, a grayscale mean was not sufficiently discriminating for the red/yellow/green LED application, and a manually positioned camera made a fixed ROI inconvenient. The final IOC retains the `NDROIConfigure` and `NDStatsConfigure` lines and template loads as comments, while `NDPluginRGB` reads RGB NDArrays directly from `STDARRAYS`.
+
+## 71. Statistics Time-Series asyn Port Was Missing
+
+**Observed startup messages**
+
+```text
+devAsynXXXArray::devAsynXXXArray, AD:Stats1:TSMinValue connectDevice failed
+asynManager:connectDevice port STATS1_TS not found
+```
+
+Similar messages appeared for other `AD:Stats1:TS...` records. The time-series records were configured to use an asyn port that was not present in that IOC configuration.
+
+**Current outcome**
+
+The ROI/Stats experiment was not retained in the active image-analysis path; its startup commands and database loads are commented out. These errors should not be described as a general failure of `NDPluginStats` or as resolved through an installed time-series port. If Stats is re-enabled, inspect its configuration and required ports/templates before loading time-series records.
+
+## 72. Custom RGB Plugin Was Loaded but Did Not Process Frames
+
+**Observed state**
+
+```text
+AD:RGB1:NDArrayPort_RBV        STDARRAYS
+AD:RGB1:EnableCallbacks_RBV    Disable
+AD:RGB1:ValidFrame_RBV         Invalid
+AD:RGB1:ValidCount_RBV         0
+AD:RGB1:InvalidCount_RBV       0
+```
+
+The correct upstream port alone does not cause the plugin to process frames. `EnableCallbacks` must be enabled, the input driver must be acquiring, and upstream NDArray callbacks must be active.
+
+**Working checks**
+
+```bash
+caput AD:RGB1:EnableCallbacks 1
+caget AD:RGB1:EnableCallbacks_RBV
+caget AD:RGB1:NDArrayPort_RBV
+caget AD:RGB1:ValidCount_RBV
+caget AD:RGB1:InvalidCount_RBV
+```
+
+The valid-frame counter later increased into the hundreds with invalid count zero in the reported tests. The final plugin validates three-dimensional `NDUInt8` RGB1 input, including the channel dimension, before calculating measurements.
+
+## 73. Mean RGB Intensities Did Not Reliably Distinguish LED Colours
+
+**Observation**
+
+The initial RGB channel means overlapped across red, yellow and green illumination because they summarize the entire image, including background. Examples included green illumination with means approximately `(71.7, 113.3, 101.4)` and red illumination with means approximately `(109.2, 90.7, 93.5)`.
+
+**Implemented improvement**
+
+`NDPluginRGB` was extended to convert each RGB pixel to HSV and count bright, sufficiently saturated pixels in the red, yellow, and green hue ranges. The thresholds were adapted from `vision/led_monitor.py`:
+
+| Colour | Hue on 0–255 scale | Shared requirements |
+|---|---|---|
+| Red | `H < 15` or `H > 240` | `S > 100`, `V > 100` |
+| Yellow | `25 <= H <= 50` | `S > 100`, `V > 100` |
+| Green | `55 <= H <= 115` | `S > 100`, `V > 100` |
+
+These are experimental thresholds, not calibrated colour boundaries. Camera exposure, white balance, background, and reflections can affect the counts.
+
+## 74. Combined Colour-Count Waveform and Array Length
+
+**Requirement**
+
+Reading `RedCount_RBV`, `YellowCount_RBV`, and `GreenCount_RBV` separately can sample different frames. The plugin therefore publishes a single three-element `asynInt32Array` callback to `AD:RGB1:ColorCounts_RBV`, ordered `[red, yellow, green]`.
+
+**Verified example**
+
+```text
+AD:RGB1:ColorCounts_RBV 3 0 0 25680
+AD:RGB1:ColorCounts_RBV.NORD 3
+```
+
+Other reported samples included yellow `[661, 4865, 4041]`, red `[16033, 528, 0]`, and green `[0, 0, 24580]`.
+
+The waveform record uses `FTVL=LONG`, `NELM=3`, and `SCAN="I/O Intr"`; the plugin's asyn interface and interrupt masks include `asynInt32ArrayMask`. `NORD=3` confirms three valid values were published. The leading `3` in ordinary `caget` array output is the displayed element count, not a colour measurement.
+
+## 75. `subArray` Outputs Display Three Elements Although One Is Selected
+
+**Observation**
+
+Three `subArray` records in `vision.db` use the same waveform as input with `CP` links, but select indices `0`, `1`, and `2` respectively. They have `MALM=3`, `NELM=1`, and `FTVL=LONG`.
+
+An example output was:
+
+```text
+AD:Vision:Red       3 246 0 0
+AD:Vision:Yellow    3 0 0 0
+AD:Vision:Green     3 5767 0 0
+```
+
+The first array element contains the selected count. A normal `caget` may display the allocated three-element buffer, including trailing zeros. Inspect `AD:Vision:Red.NORD` (and the corresponding yellow/green fields) to check the number of selected valid elements; `NELM` is the requested subset size and `MALM` is the maximum capacity.
+
+**Verified functional result**
+
+A scalar `calc` record linked to the three outputs successfully calculated `AD:Vision:Total`. This establishes functional extraction and scalar use in the tested IOC, but not atomic synchronization across the three records.
+
+## 76. CP-Linked Calculations Produced Brief Intermediate LED States
+
+**Observation**
+
+`vision.db` uses three independently CP-triggered `subArray` records and downstream CP-linked `calc` records. `camonitor AD:Vision:LEDStatus` and `camonitor AD:Vision:LEDState` generally followed the physical red → green → yellow → off sequence at roughly ten-second intervals. Some transitions briefly reported `UNKNOWN` before the expected state, with monitor timestamps tens or hundreds of microseconds apart.
+
+For example:
+
+```text
+13:43:42.662999 UNKNOWN
+13:43:42.663109 NORMAL
+```
+
+**Interpretation**
+
+CP links trigger processing when their sources post updates, but do not guarantee that three records execute simultaneously or that a downstream calculation sees an atomic snapshot. Multiple calculations per input update and mixed old/new counts are plausible causes; physical colour-transition ambiguity is another possibility. The logs alone do not isolate the cause.
+
+**Current decision**
+
+Keep the database-only design for this experimental application because repeated state-sequence tests worked. Do not describe it as a guaranteed same-frame classifier. Matching periodic scan rates would also not provide that guarantee. A single synchronized extraction/processing operation or explicit frame identity would be needed for stricter use cases.
+
+## 77. LED Alarm Severity and Human-Readable State
+
+**Current configuration**
+
+`AD:Vision:LEDStatus` is the numerical `calc` record with values `0=UNKNOWN/OFF`, `1=NORMAL`, `2=WARNING`, and `3=FAULT`. Its thresholds are `HIGH=1.5` with `HSV=MINOR` and `HIHI=2.5` with `HHSV=MAJOR`.
+
+| Status | Numerical value | Configured threshold severity |
+|---|---:|---|
+| UNKNOWN / OFF | 0 | NO_ALARM |
+| NORMAL | 1 | NO_ALARM |
+| WARNING | 2 | MINOR |
+| FAULT | 3 | MAJOR |
+
+`AD:Vision:LEDState` is an `mbbi` record mapping those values to readable names without separate state alarm severities. This avoids duplicating the alarm mapping. A Phoebus widget that needs the alarm from the classifier should monitor `AD:Vision:LEDStatus`; do not assume that the `mbbi` automatically inherits its severity.
+
+**Verification**
+
+```bash
+caget AD:Vision:LEDStatus
+caget AD:Vision:LEDStatus.SEVR
+caget AD:Vision:LEDState
+camonitor AD:Vision:LEDState
+```
+
+If camera acquisition stops, the last LED state can remain displayed. A freshness timeout or stale-data alarm has not yet been implemented.
+
+## 78. Updated Verification and Open Issues — 5 November 2026
+
+**Functionally verified**
+
+- Continuous Picamera2-to-areaDetector RGB frame transfer and image display.
+- Custom `NDPluginRGB` valid-frame processing, RGB channel means, and HSV pixel counts.
+- A three-element colour-count waveform populated from one processed NDArray.
+- EPICS `subArray` extraction, diagnostic calculations, LED classification, and alarm thresholds.
+- Phoebus LED monitoring and repeated FAULT → NORMAL → WARNING → UNKNOWN/OFF transitions.
+
+**Not established**
+
+- Strict same-frame synchronization of the downstream CP-linked `calc` results.
+- Calibrated colour accuracy under varied camera positioning and illumination.
+- Quantified end-to-end latency, sustained frame rate, dropped-frame rate, CPU and memory use.
+- Automatic stale-state indication when the acquisition process stops.
+- Long-duration reliability or robust recovery after IOC/client failure.
+
+For the active IOC architecture and configuration, see [areaDetector Camera IOC](areadetector_ioc.md). For the development chronology and experimental results, see [Implementation and Results](implementation_and_results.md).
