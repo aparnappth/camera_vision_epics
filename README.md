@@ -46,28 +46,51 @@ The system is a learning and experimental development platform, not a calibrated
 ## Architecture
 
 ```text
-Phoebus / CA and PVA clients
-          |
-  StreamDevice IOC (CAM:)
-          |
-   StreamDevice + asyn
-          |
-   TCP 127.0.0.1:5000
-          |
-acquisition/picamera2_server.py
-          |
-    Picamera2 / IMX219
-          |
-     JPEG + JSON
-          |
-   +------+------+------------------+
-   |             |                  |
-camera_scan.py  led_monitor.py  pva_image_publisher.py
-   |             |                  |
-Scan PVs       LED PVs        pva://CAM:Image
-   +-------------+------------------+
-                 |
-               Phoebus
+                         Phoebus / EPICS clients
+                       (Remote control and display)
+                                   |
+                         Channel Access / PVAccess
+                                   |
+                           EPICS IOC + QSRV
+                         (Control and data PVs)
+                                   |
+                           StreamDevice + asyn
+                                   |
+                           TCP 127.0.0.1:5000
+                                   |
+                            Python camera server
+                          acquisition/picamera2_server.py
+                                   |
+                            Picamera2 / libcamera
+                                   |
+                              IMX219 camera
+                                   |
+                           Acquired JPEG + JSON
+                                   |
+                  +----------------+----------------+
+                  |                |                |
+                  v                v                v
+             Camera scan      LED recognition    Image publisher
+             camera_scan.py   led_monitor.py     pva_image_publisher.py
+                  |                |                |
+             Mean intensity   LED colour       Resized RGB image
+             Exposure/gain    and status       published via p4p
+             scan results          |                |
+                  |                |                |
+                  v                v                v
+             EPICS scan       EPICS vision       CAM:Image
+             result PVs       status PVs         (PVAccess)
+                  |                |                |
+                  v                v                v
+             Phoebus XY       Phoebus LED        Phoebus Image
+                plots         status display        widget
+
+
+    Independent hardware used for vision monitoring:
+
+        Touch sensor --> led_controller.py --> RGB LED
+                                                  |
+                                      Observed by IMX219 camera
 ```
 
 The camera server is the process controlling the IMX219 in this workflow. The scan controller and vision monitor use EPICS to request acquisitions and analyze saved files; the image publisher reads the latest JPEG and publishes resized pixels separately through PVAccess.
