@@ -1,11 +1,11 @@
 # Implementation and Results
 
 **EPICS-Controlled Camera Characterization and Vision Platform**  
-**Development record through 2 November 2026**
+**Development record through 5 November 2026**
 
 This document records the implementation stages, design decisions, tests and observed results of the project. It complements the [project overview](../README.md), the [StreamDevice IOC implementation guide](streamdevice_ioc.md), the [areaDetector IOC implementation guide](areadetector_ioc.md), and the [troubleshooting record](troubleshooting.md). Earlier experiments are retained as historical results even where their scripts have since been retired.
 
-The active scan controller is `automation/camera_scan.py`; the separate `vision/led_monitor.py` now performs periodic camera-based RGB LED status recognition through EPICS. Exposure and gain scans, LED status publication, and Phoebus visualization have been exercised successfully. A separate areaDetector IOC has also been tested for single-frame in-memory RGB acquisition and Phoebus display. Broader reliability and performance testing remains open.
+The active scan controller is `automation/camera_scan.py`; the separate `vision/led_monitor.py` now performs periodic camera-based RGB LED status recognition through EPICS. Exposure and gain scans, LED status publication, and Phoebus visualization have been exercised successfully. The separate areaDetector IOC progressed from single-frame RGB transfer to continuous acquisition, a custom `NDPluginRGB` C++ analysis plugin, HSV colour counting, and EPICS-based LED classification with Phoebus monitoring. Broader reliability and performance testing remains open.
 
 ---
 
@@ -378,17 +378,98 @@ The areaDetector IOC, Python test and Phoebus display were committed on `feature
 
 **Result:** Single-frame RGB acquisition, EPICS image transfer and Phoebus visualization were demonstrated without a custom areaDetector camera driver or intermediate JPEG files.
 
-#### 17.6 Current scope and limitations
+#### 17.6 Scope and limitations at the 2 November checkpoint
 
-This experiment verifies one image per Python test execution, even though the IOC is placed in Continuous acquisition mode. It does not yet demonstrate a continuous Picamera2-to-areaDetector frame stream, measure frame-transfer throughput or end-to-end latency, or connect the areaDetector image pipeline to the existing LED classifier. The use of Channel Access waveforms introduces its own transfer overhead; the absence of the custom TCP camera protocol does not by itself establish a performance improvement. The StreamDevice-based scanning and periodic LED-monitoring workflows remain separate and unchanged.
+At the 2 November checkpoint, this experiment verified one image per Python test execution, even though the IOC was placed in Continuous acquisition mode. It had not yet demonstrated a continuous Picamera2-to-areaDetector frame stream, measured frame-transfer throughput or end-to-end latency, or connected the areaDetector image pipeline to the existing LED classifier. The use of Channel Access waveforms introduces its own transfer overhead; the absence of the custom TCP camera protocol does not by itself establish a performance improvement. The StreamDevice-based scanning and periodic LED-monitoring workflows remain separate and unchanged.
 
-### Possible Future Extensions
+### 18. Continuous areaDetector Acquisition and Custom RGB Plugin (4 November 2026)
 
-The following are exploratory options rather than scheduled implementation work:
+The single-frame experiment in Section 17 was extended with `acquisition/tests/test_areadetector_continuous.py`, which repeatedly captures Picamera2 RGB frames and transfers them into `AD:Input:ArrayIn` through PyEpics. The input driver (`STDARRAYS`) generates UInt8 RGB1 NDArrays with dimensions `[3, 320, 240]`. Two plugins receive callbacks directly from `STDARRAYS`: `IMAGE1` for Phoebus image display and the custom `RGB1` plugin for analysis. The original StreamDevice camera server must not hold the IMX219 simultaneously.
 
-- Extend the verified areaDetector single-frame path to repeated in-memory acquisition and measure frame rate, transfer latency, CPU usage and memory consumption on the Raspberry Pi Zero 2 W.
-- Investigate continuous frame-based LED recognition using the areaDetector pipeline and compare its response time with the existing approximately three-second JPEG-based monitoring cycle.
-- Explore areaDetector ROI and statistics plugins, or Python-side analysis of incoming frames, for image processing without saving every frame.
-- Consider a physical buzzer driven by the detected alarm state after additional validation.
-- Extend image processing and analysis beyond image-wide mean grayscale intensity.
-- Improve communication recovery and synchronization across IOC or camera-server disconnects.
+#### 18.1 Investigating standard areaDetector plugins
+
+`NDPluginROI` and `NDPluginStats` were investigated as a way to isolate RGB channels and compute statistics. Source inspection confirmed that RGB1 places the colour dimension first, and ROI cropping to one colour component can collapse that dimension and change the output to monochrome. The Stats plugin reports statistics over its received array, rather than dedicated `MeanRed`, `MeanGreen`, and `MeanBlue` outputs. ROI/Stats experiments were retained as commented-out IOC startup configuration. The `STATS1_TS` port errors seen during testing arose from missing time-series port configuration in that experimental setup. A general-purpose custom plugin was chosen for direct per-pixel RGB and HSV analysis.
+
+#### 18.2 Implementing `NDPluginRGB`
+
+`NDPluginRGB.h`, `NDPluginRGB.cpp`, `NDPluginRGB.dbd`, and `NDPluginRGB.template` were added to the areaDetector IOC. The plugin derives from `NDPluginDriver`, is configured by `NDRGBConfigure("RGB1", 2, 0, "STDARRAYS", 0, 0, 0, 0, 0, 1)`, and is compiled and registered through the application's Makefile and DBD. It validates three-dimensional UInt8 RGB1 input with three interleaved colour components, computes the mean intensity of each RGB channel, and maintains valid/invalid frame counters.
+
+The plugin also converts each RGB pixel to an approximately Pillow-compatible 0–255 HSV representation and applies the thresholds originally tested in `vision/led_monitor.py`:
+
+| Colour | Hue selection | Common saturation/value selection |
+|---|---|---|
+| Red | `H < 15` or `H > 240` | `S > 100` and `V > 100` |
+| Yellow | `25 <= H <= 50` | `S > 100` and `V > 100` |
+| Green | `55 <= H <= 115` | `S > 100` and `V > 100` |
+
+The resulting red, yellow, and green counts are available as individual diagnostic PVs, along with the total coloured-pixel count. The HSV implementation has not been exhaustively compared with Pillow at every threshold boundary, and the colour thresholds remain experimentally chosen constants.
+
+#### 18.3 NDArray ownership correction
+
+An early plugin version caused `NDArrayPool:release ERROR, reference count < 0` and a suspended `IMAGE1_Plugin_1` thread. The measurement-only plugin was corrected to avoid forwarding its input NDArray through `endProcessCallbacks()` and to avoid manually releasing the incoming array. Subsequent tests reported valid frames without this reference-counting failure. This was a plugin ownership issue, not a reason to alter the upstream image driver.
+
+#### 18.4 Verified RGB measurements
+
+A green–yellow–red test of the mean-channel outputs showed the expected relative changes:
+
+| LED state | Red mean | Green mean | Blue mean |
+|---|---:|---:|---:|
+| Green | 71.7244 | 113.3400 | 101.3620 |
+| Yellow | 95.8624 | 101.0440 | 94.2328 |
+| Red | 109.2030 | 90.7047 | 93.5273 |
+
+These are full-image averages, so the background contributes substantially. Per-pixel HSV segmentation gave a more discriminating measurement for the LED application.
+
+### 19. Frame-Consistent Colour-Count Waveform and LED Tests (4–5 November 2026)
+
+The plugin was extended with an `asynInt32Array` output, exposed as `AD:RGB1:ColorCounts_RBV`. Each callback publishes `[RedCount, YellowCount, GreenCount]` calculated from one processed NDArray. The associated waveform has `FTVL=LONG`, `NELM=3`, and `SCAN="I/O Intr"`; `NORD=3` was verified. This avoids mixing frames when obtaining the three counts in **one waveform read**, unlike separate sequential scalar PV reads.
+
+Representative physical LED tests produced:
+
+| LED state | Red count | Yellow count | Green count | Classification using original thresholds |
+|---|---:|---:|---:|---|
+| Green | 0 | 0 | 25,680 | NORMAL |
+| Yellow | 661 | 4,865 | 4,041 | WARNING |
+| Red | 16,033 | 528 | 0 | FAULT |
+| Green again | 0 | 0 | 24,580 | NORMAL |
+
+The green–yellow–red–green sequence was detected correctly. The values are representative observations, not a calibrated performance dataset. The waveform guarantees that its three elements were computed from the same NDArray; it does not automatically guarantee atomic processing in downstream EPICS records.
+
+### 20. EPICS Database Classification, Alarms, and Phoebus (5 November 2026)
+
+#### 20.1 `vision.db` without a new C++ classification function
+
+The final `areadetector_cameraApp/Db/vision.db` uses standard EPICS records. Three `subArray` records (`AD:Vision:Red`, `Yellow`, and `Green`) read `AD:RGB1:ColorCounts_RBV` through `CP` links, with `MALM=3`, `NELM=1`, and `INDX=0`, `1`, and `2`. Their first output elements feed passive `calc` records through CP links. The calculations publish:
+
+- `AD:Vision:Total` = red + yellow + green.
+- `AD:Vision:RedGreenRatio` = red / max(green, 1).
+- `AD:Vision:YellowFraction` = yellow / max(total, 1).
+- `AD:Vision:LEDStatus` = numerical status according to the tested threshold rules.
+- `AD:Vision:LEDState` = human-readable state through an `mbbi` record.
+
+The status calculation applies the rules in order: total below 1000 → UNKNOWN (0); red/green above 20 and yellow fraction below 0.05 → FAULT (3); yellow fraction above 0.10 → WARNING (2); red/green below 0.2 and yellow fraction below 0.02 → NORMAL (1); otherwise UNKNOWN (0). OFF is therefore represented by UNKNOWN rather than by a separate explicit off-state detector.
+
+#### 20.2 Alarm responsibilities
+
+`AD:Vision:LEDStatus` is the numerical classification and the source of EPICS alarm thresholds: `HIGH=1.5` with MINOR severity, and `HIHI=2.5` with MAJOR severity. Thus WARNING (2) is MINOR, FAULT (3) is MAJOR, and NORMAL (1) and UNKNOWN (0) have no alarm from these thresholds. `AD:Vision:LEDState` maps the values to UNKNOWN, NORMAL, WARNING, and FAULT for operator display without duplicating the alarm thresholds. Phoebus widgets that require alarm severity should reference `LEDStatus` or have their alarm propagation explicitly verified.
+
+#### 20.3 End-to-end verification and remaining synchronization limitation
+
+The areaDetector Phoebus display (`phoebus/epics_Camera_vision_areadetector.bob`) was updated to combine the camera image and vision-status monitoring. During a repeated physical LED test, `camonitor AD:Vision:LEDState` showed the intended FAULT → NORMAL → WARNING → UNKNOWN/OFF cycle, with states changing approximately every ten seconds. Some near-simultaneous intermediate UNKNOWN events were observed during transitions (including pairs separated by tens to hundreds of microseconds), but the expected sustained states were repeatedly recognized.
+
+The independent CP-triggered `subArray` and `calc` records may process multiple times per waveform update and can transiently use counts from different frames. Functional operation was demonstrated; strict downstream same-frame classification has **not** been established. Matching scan periods would not provide an atomic snapshot either. Further work could introduce a synchronized snapshot/trigger mechanism if the application requires stronger guarantees.
+
+The feature work was committed on `feature/areadetector-continuous`, merged into `main` through pull request #2 (merge commit `1049c2d`), and synchronized to Windows and Raspberry Pi. The feature branch was subsequently removed.
+
+### Current Limitations and Possible Future Extensions
+
+The following points remain open after the 5 November verification:
+
+- .
+- Establish strict frame-consistent downstream classification if required, rather than relying on independently CP-triggered records.
+- Detect stale vision status when acquisition stops; the last published LED state can remain visible.
+- Validate HSV thresholds under changing backgrounds, camera positions, illumination, and exposure settings, including LED absence and colour-boundary cases.
+- Consider a physical buzzer alarm and additional vision-analysis capabilities after validation.
+- Continue investigating robust camera/IOC communication recovery and Phoebus responsiveness.
+
+For detailed current IOC configuration, see [areaDetector Camera IOC](areadetector_ioc.md). For the C++ processing design, see [NDPluginRGB Technical Note](notes/ndplugin_rgb.md). For problems and resolutions, see [Troubleshooting](troubleshooting.md).
