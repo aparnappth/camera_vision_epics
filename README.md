@@ -170,7 +170,6 @@ The custom C++ plugin derives from `NDPluginDriver`, validates incoming RGB1 NDA
 
 The plugin publishes `AD:RGB1:RedMean_RBV`, `GreenMean_RBV`, `BlueMean_RBV`, individual colour counts, and a three-element `AD:RGB1:ColorCounts_RBV` waveform ordered **[red, yellow, green]**. Each waveform callback contains counts from one processed NDArray.
 
-An early implementation encountered `NDArrayPool:release ERROR, reference count < 0`. The measurement-only plugin was corrected not to forward or manually release the incoming NDArray. See the [NDPluginRGB technical guide](docs/notes/ndplugin_rgb.md).
 
 ## `vision.db` Classification and Alarms
 
